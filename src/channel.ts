@@ -276,6 +276,23 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
           cfg: ctx.cfg as CoreConfig,
         }),
     },
+    // XEP-0085 chat state notifications. Same plugin-SDK heartbeat hook
+    // Matrix wires to its own sendTypingMatrix (see extensions/matrix/src/
+    // channel.ts's `heartbeat` block) -- ported from xmpp.ts's setTyping(),
+    // which sent <composing/> while the agent was working and relied on
+    // deliver() to send <active/> once the reply landed (sendMessageXmpp
+    // already does that <active/> clear; clearTyping below is for the case
+    // where a turn ends with no outbound message, e.g. a silent/errored turn).
+    heartbeat: {
+      sendTyping: async ({ cfg, to, accountId }) => {
+        const { sendTypingXmpp } = await loadXmppChannelRuntime();
+        await sendTypingXmpp(to, { cfg: cfg as CoreConfig, accountId: accountId ?? undefined });
+      },
+      clearTyping: async ({ cfg, to, accountId }) => {
+        const { clearTypingXmpp } = await loadXmppChannelRuntime();
+        await clearTypingXmpp(to, { cfg: cfg as CoreConfig, accountId: accountId ?? undefined });
+      },
+    },
   },
   pairing: {
     text: {

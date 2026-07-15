@@ -258,6 +258,61 @@ export async function sendFileXmpp(
 }
 
 /**
+ * XEP-0085 chat state notifications: send <composing/> (start/refresh
+ * typing) or <active/> (clear typing). Ported from xmpp.ts's setTyping()
+ * (which sent <composing/> paired with a 'processing' presence status) and
+ * the plain <active/> clear already used at the end of sendMessageXmpp
+ * above. Wired into channel.ts's base.heartbeat.sendTyping/clearTyping
+ * (the plugin-SDK hook Matrix uses for the same purpose via
+ * sendTypingMatrix) -- best-effort only, mirroring xmpp.ts's own
+ * try/catch-and-log-debug behavior; a failed typing indicator must never
+ * fail the calling turn.
+ */
+export async function sendTypingXmpp(to: string, opts: SendXmppOptions): Promise<void> {
+  const cfg = requireRuntimeConfig(opts.cfg, "XMPP typing") as CoreConfig;
+  const account = resolveXmppAccount({ cfg, accountId: opts.accountId });
+  if (!account.configured) return;
+  let target: string;
+  try {
+    target = resolveTarget(to, opts);
+  } catch {
+    return;
+  }
+  const connection = getActiveXmppConnection(account.accountId);
+  if (!connection?.isConnected()) return;
+  const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
+  try {
+    await connection.send(
+      xml("message", { type, to: target }, xml("composing", { xmlns: "http://jabber.org/protocol/chatstates" })),
+    );
+  } catch {
+    // best-effort, same as xmpp.ts's setTyping()
+  }
+}
+
+export async function clearTypingXmpp(to: string, opts: SendXmppOptions): Promise<void> {
+  const cfg = requireRuntimeConfig(opts.cfg, "XMPP typing") as CoreConfig;
+  const account = resolveXmppAccount({ cfg, accountId: opts.accountId });
+  if (!account.configured) return;
+  let target: string;
+  try {
+    target = resolveTarget(to, opts);
+  } catch {
+    return;
+  }
+  const connection = getActiveXmppConnection(account.accountId);
+  if (!connection?.isConnected()) return;
+  const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
+  try {
+    await connection.send(
+      xml("message", { type, to: target }, xml("active", { xmlns: "http://jabber.org/protocol/chatstates" })),
+    );
+  } catch {
+    // best-effort
+  }
+}
+
+/**
  * XEP-0308 Last Message Correction: send a NEW stanza (own fresh id)
  * carrying <replace id='ORIGINAL'/>. Corrections must be a single stanza —
  * if the edited body exceeds XMPP_MAX_BODY we truncate to the first chunk

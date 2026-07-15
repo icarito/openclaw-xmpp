@@ -99,6 +99,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     const commandRuntime: XmppCommandRuntime = registerXmppCommands({
       account,
       cfg,
+      runtime,
       sendPlain,
     });
 

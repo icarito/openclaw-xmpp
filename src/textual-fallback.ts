@@ -25,16 +25,20 @@ interface PendingTextualCommand {
 export interface TextualFallbackOptions {
   dispatcher: ActionDispatcher;
   sendPlain: (to: string, text: string) => void;
+  /** OpenClaw accountId this connection belongs to, forwarded as ActionContext.accountId (mirrors xep-0050.ts's handler ctx). */
+  accountId?: string;
 }
 
 export class TextualFallback {
   private dispatcher: ActionDispatcher;
   private sendPlain: (to: string, text: string) => void;
+  private accountId: string;
   private pending: Map<string, PendingTextualCommand> = new Map();
 
   constructor(options: TextualFallbackOptions) {
     this.dispatcher = options.dispatcher;
     this.sendPlain = options.sendPlain;
+    this.accountId = options.accountId ?? "";
   }
 
   handleMessage(jid: string, body: string): boolean {
@@ -66,12 +70,16 @@ export class TextualFallback {
     }
 
     if (action.params.length === 0) {
-      try {
-        const result = action.handler({});
-        this.sendPlain(jid, `${action.name}:\n${result}`);
-      } catch (err) {
-        this.sendPlain(jid, `Error in ${action.name}: ${String(err)}`);
-      }
+      // action.handler may be async (native session commands in
+      // native-commands.ts dispatch a full inbound turn and return an
+      // immediate "submitted" acknowledgement string -- handleMessage itself
+      // stays synchronous (mirrors xep-0050.ts's IQ-response contract of
+      // "the actual reply arrives as a separate chat message"), so this
+      // resolves the promise fire-and-forget rather than blocking the
+      // caller on a potentially slow agent turn.
+      void Promise.resolve(action.handler({}, { fromJid: jid, accountId: this.accountId }))
+        .then((result) => this.sendPlain(jid, `${action.name}:\n${result}`))
+        .catch((err) => this.sendPlain(jid, `Error in ${action.name}: ${String(err)}`));
       return true;
     }
 
@@ -135,8 +143,9 @@ export class TextualFallback {
       const action = this.dispatcher.getAction(session.node);
       if (action) {
         try {
-          const result = action.handler(params);
-          this.sendPlain(jid, `${action.name} completed:\n${result}`);
+          void Promise.resolve(action.handler(params, { fromJid: jid, accountId: this.accountId }))
+            .then((result) => this.sendPlain(jid, `${action.name} completed:\n${result}`))
+            .catch((err) => this.sendPlain(jid, `Error in ${action.name}: ${String(err)}`));
         } catch (err) {
           this.sendPlain(jid, `Error in ${action.name}: ${String(err)}`);
         }

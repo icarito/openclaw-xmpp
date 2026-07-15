@@ -3,39 +3,42 @@
 // XmppControlLayer (NanoClaw), retargeted to OpenClaw's accountId/config
 // model instead of agentGroupId/sqlite.
 //
-// See PORT-NOTES.md for the full list of what's live vs. stubbed. Summary:
-//   - context/compact/clear (session-commands.ts in NanoClaw) -- STUBBED.
-//     NanoClaw wrote the exact slash-command text into its own
-//     inbound.db/session-manager and gated it with gateCommand() against a
-//     user_roles table that has no OpenClaw equivalent. There is no
-//     documented OpenClaw plugin-SDK primitive to (a) inject a synthetic
-//     inbound text message into the SAME dispatch pipeline core.channel.inbound
-//     uses, or (b) check "is this JID an admin for this agent" outside of
-//     the config's own allowFrom lists. TODO(xmpp-migration): once such a
-//     primitive exists, port buildSessionCommandActions() for real.
-//   - model (model-action.ts) -- STUBBED. Required container_configs table
-//     + restartAgentGroupContainers(), both NanoClaw internals.
-//   - agent-lifecycle (list/info/logs/disable/enable/archive) -- STUBBED.
-//     Required `ncl` CLI + docker + a central sqlite DB, none of which
-//     exist under OpenClaw's process model (one gateway process, agents are
-//     config entries, not docker containers).
-//   - skill commands (skill-scan.ts / skill-commands.ts) -- STUBBED. Would
-//     need an OpenClaw-native skills registry + a way to inject a prompt
-//     into a running agent session out-of-band; not found in the IRC/Matrix
-//     reference plugins.
-//   - approval-bypass -- STUBBED. NanoClaw-specific (modules/approvals/bypass.ts).
+// See PORT-NOTES.md ("2026-07 update") for the full writeup. Summary:
+//   - context/compact/clear/model -- LIVE. Wired to OpenClaw's real native
+//     command registry (openclaw/plugin-sdk/command-auth-native, the same
+//     module Telegram's bot-native-commands.ts uses) via
+//     native-commands.ts's buildNativeCommandActions(). Invoking one of
+//     these from the XEP-0050 menu builds the same synthetic slash-command
+//     text Telegram builds (buildCommandTextFromArgs) and runs it through
+//     this plugin's own handleXmppInbound() -- the exact pipeline a typed
+//     "/compact" chat message already used. No NanoClaw-style container
+//     restart or sqlite role table involved.
+//   - agent-lifecycle (list/info/logs/disable/enable/archive) -- NOT
+//     ported. Required `ncl` CLI + docker + a central sqlite DB tracking
+//     per-agent-group containers. OpenClaw has no equivalent concept (one
+//     gateway process, agents are config entries, not Docker containers);
+//     see PORT-NOTES.md for why this isn't a mechanical port.
+//   - skill commands (skill-scan.ts / skill-commands.ts) -- NOT ported.
+//     OpenClaw's own skill system (openclaw/plugin-sdk/command-auth-native's
+//     listSkillCommandsForAgents) is the native replacement in principle,
+//     but wiring it fully requires passing skillCommands into
+//     inbound.ts's hasControlCommand/shouldHandleTextCommands call sites,
+//     which is deeper surgery than this pass covers -- see PORT-NOTES.md.
+//   - approval-bypass -- NOT ported. NanoClaw-specific (modules/approvals/bypass.ts),
+//     no OpenClaw equivalent.
 // What IS live: the XEP-0050/XEP-0004 protocol machinery itself (xep-0050.ts,
-// xep-0004.ts), the textual /oc fallback, and a `context`-style read-only
-// action wired to telemetry.ts (see below) where the data genuinely is
-// available from this plugin's own connection state.
+// xep-0004.ts), the textual /oc fallback, and now the four native session
+// commands via native-commands.ts.
 import type { Element } from "@xmpp/xml";
 import { xml } from "@xmpp/client";
 import type { ResolvedXmppAccount } from "./accounts.js";
-import { createActionDispatcher, type ActionContext, type XmppAction } from "./actions.js";
+import { createActionDispatcher, type XmppAction } from "./actions.js";
+import { buildNativeCommandActions } from "./native-commands.js";
 import { Xep0050Handler } from "./xep-0050.js";
 import { TextualFallback } from "./textual-fallback.js";
 import { buildCorrectionStanza, buildQueryCommandStanza } from "./outbound-render.js";
 import { normalizeXmppOptions, matchOptionReply, shortQuestionId } from "./ask-question.js";
+import type { RuntimeEnv } from "./runtime-api.js";
 import type { CoreConfig } from "./types.js";
 
 export interface XmppCommandRuntime {
@@ -60,10 +63,12 @@ export interface XmppCommandRuntime {
   cleanup: () => void;
 }
 
-function buildAccountStubActions(account: ResolvedXmppAccount): XmppAction[] {
-  // Minimal placeholder actions so the command menu is not empty and a
-  // client immediately sees what is/isn't wired up yet, instead of silently
-  // having zero commands. Each explains its own TODO inline.
+function buildAccountActions(params: {
+  account: ResolvedXmppAccount;
+  cfg: CoreConfig;
+  runtime: RuntimeEnv;
+}): XmppAction[] {
+  const { account, cfg, runtime } = params;
   return [
     {
       node: "status",
@@ -84,52 +89,10 @@ function buildAccountStubActions(account: ResolvedXmppAccount): XmppAction[] {
       // "status".
       handler: () => "Use /oc or !oc to list commands, or the Execute Command menu in your client.",
     },
-    {
-      node: "context",
-      name: "Context: usage",
-      description:
-        "TODO(xmpp-migration): stubbed. NanoClaw answered this from opencode.db token counts " +
-        "(see src/agent-telemetry.ts readAgentTelemetry). OpenClaw's equivalent would be " +
-        "api.runtime.agent.session.* usage/token accounting, if such an API is exposed to " +
-        "channel plugins -- not found in the IRC/Matrix reference plugins, so this is left " +
-        "unimplemented rather than guessed at.",
-      params: [],
-      mutating: false,
-      handler: () =>
-        "Not implemented: context/token telemetry has no confirmed OpenClaw plugin-SDK read path yet. See PORT-NOTES.md.",
-    },
-    {
-      node: "compact",
-      name: "Context: compact",
-      description:
-        "TODO(xmpp-migration): stubbed. NanoClaw injected the literal '/compact' text into the " +
-        "agent's own session via writeSessionMessage()+wakeContainer(), gated by gateCommand(). " +
-        "No OpenClaw primitive found for injecting a synthetic inbound message into " +
-        "core.channel.inbound from a channel plugin's own command layer.",
-      params: [],
-      mutating: true,
-      handler: () => "Not implemented: see PORT-NOTES.md (session-commands stub).",
-    },
-    {
-      node: "clear",
-      name: "Context: clear",
-      description: "TODO(xmpp-migration): stubbed, same reason as compact.",
-      params: [],
-      mutating: true,
-      handler: () => "Not implemented: see PORT-NOTES.md (session-commands stub).",
-    },
-    {
-      node: "model",
-      name: "LLM Model",
-      description:
-        "TODO(xmpp-migration): stubbed. NanoClaw persisted a per-agent-group model override to " +
-        "container_configs and restarted docker containers. OpenClaw's per-agent model config " +
-        "lives in its own config surface (outside this plugin's reach) -- wire this once a " +
-        "documented api.runtime.agent.config.* setter exists.",
-      params: [],
-      mutating: true,
-      handler: () => "Not implemented: see PORT-NOTES.md (model-action stub).",
-    },
+    // context/compact/clear/model -- see native-commands.ts. These call
+    // into OpenClaw's real native command registry, the same one Telegram
+    // uses for its slash commands.
+    ...buildNativeCommandActions({ account, cfg, runtime }),
   ];
 }
 
@@ -141,19 +104,20 @@ function buildAccountStubActions(account: ResolvedXmppAccount): XmppAction[] {
 export function registerXmppCommands(params: {
   account: ResolvedXmppAccount;
   cfg: CoreConfig;
+  runtime: RuntimeEnv;
   sendPlain: (to: string, text: string) => void;
   log?: { debug?: (m: string) => void; info?: (m: string) => void };
 }): XmppCommandRuntime {
-  const { account, sendPlain, log } = params;
+  const { account, cfg, runtime, sendPlain, log } = params;
 
-  const dispatcher = createActionDispatcher(buildAccountStubActions(account));
+  const dispatcher = createActionDispatcher(buildAccountActions({ account, cfg, runtime }));
 
   const xep0050 = new Xep0050Handler({
     dispatcher,
     accountId: account.accountId,
     log,
   });
-  const textual = new TextualFallback({ dispatcher, sendPlain });
+  const textual = new TextualFallback({ dispatcher, sendPlain, accountId: account.accountId });
 
   // questionId -> pending question bookkeeping, and node -> {questionId,
   // value} for q:* command nodes, mirroring xmpp.ts's pendingQuestions /
