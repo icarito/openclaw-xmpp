@@ -1,0 +1,34 @@
+{
+  "id": "xmpp",
+  "activation": {
+    "onStartup": false
+  },
+  "channels": ["xmpp"],
+  "channelConfigs": {
+    "xmpp": {
+      "label": "XMPP",
+      "selectionLabel": "XMPP (Jabber JID + password)",
+      "detailLabel": "XMPP",
+      "docsPath": "/channels/xmpp",
+      "docsLabel": "xmpp",
+      "blurb": "XMPP/Jabber accounts with 1:1 chat, MUC rooms, and ad-hoc commands.",
+      "systemImage": "message"
+    }
+  },
+  "channelEnvVars": {
+    "xmpp": [
+      "XMPP_JID",
+      "XMPP_PASSWORD",
+      "XMPP_SERVICE",
+      "XMPP_MUC_DOMAIN",
+      "XMPP_CONTEXT_WINDOW_TOKENS",
+      "XMPP_COST_INPUT_PER_1M",
+      "XMPP_COST_OUTPUT_PER_1M"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
