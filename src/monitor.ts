@@ -117,7 +117,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
         connection = onlineConnection;
         registerActiveXmppConnection(account.accountId, onlineConnection);
         telemetryLoop?.stop();
-        telemetryLoop = startTelemetryLoop({ account, connection: onlineConnection, logger });
+        telemetryLoop = startTelemetryLoop({ account, cfg, connection: onlineConnection, logger });
         logger.info(`[${account.accountId}] connected as ${jid}`);
       },
       onOffline: () => {
