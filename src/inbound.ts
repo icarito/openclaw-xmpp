@@ -6,7 +6,9 @@
 // identity per message (the bare JID from a sealed s2s/c2s `from`), so there
 // is no nick/user/host tri-state to reconcile the way IRC's ircIngressIdentity
 // aliases do.
-import { logInboundDrop } from "openclaw/plugin-sdk/channel-inbound";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { buildChannelInboundMediaPayload, logInboundDrop } from "openclaw/plugin-sdk/channel-inbound";
 import {
   channelIngressRoutes,
   createChannelIngressResolver,
@@ -140,6 +142,48 @@ async function deliverXmppReply(params: {
       params.statusSink?.({ lastOutboundAt: Date.now() });
     },
   });
+}
+
+/**
+ * Baja un adjunto entrante a disco y devuelve sus datos para el agente.
+ *
+ * Por qué descargarlo aquí en vez de pasarle sólo la URL: si el agente sólo
+ * recibe un link, para verlo tiene que ejecutar un `curl`, y CUALQUIER exec
+ * dispara una tarjeta de aprobación (exec-approvals `ask: "always"`). Pedirle
+ * permiso al usuario para bajar el archivo que él mismo acaba de mandar no
+ * tiene sentido. Entregándolo ya descargado (MediaPath), el agente no ejecuta
+ * nada y no hay aprobación que pedir.
+ *
+ * Si la descarga falla se devuelve null y el flujo sigue con la URL suelta
+ * (comportamiento anterior), nunca se pierde el mensaje.
+ */
+async function downloadInboundAttachment(params: {
+  url: string;
+  stateDir: string;
+  runtime: RuntimeEnv;
+}): Promise<{ path: string; contentType?: string } | null> {
+  const { url, stateDir, runtime } = params;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+    if (!response.ok) {
+      runtime.error?.(`[xmpp] no se pudo bajar el adjunto (HTTP ${response.status}): ${url}`);
+      return null;
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const dir = path.join(stateDir, "media", "inbound");
+    await fs.mkdir(dir, { recursive: true });
+    // Nombre del archivo del propio link (XEP-0363 lo conserva), saneado y
+    // con un prefijo único para no pisar dos adjuntos con el mismo nombre.
+    const rawName = decodeURIComponent(new URL(url).pathname.split("/").pop() || "file");
+    const safeName = rawName.replace(/[^\w.\-]+/g, "_").slice(-80) || "file";
+    const target = path.join(dir, `${Date.now().toString(36)}-${safeName}`);
+    await fs.writeFile(target, buffer);
+    const contentType = response.headers.get("content-type") ?? undefined;
+    return { path: target, ...(contentType ? { contentType } : {}) };
+  } catch (error) {
+    runtime.error?.(`[xmpp] fallo al bajar el adjunto ${url}: ${String(error)}`);
+    return null;
+  }
 }
 
 export async function handleXmppInbound(params: {
@@ -346,13 +390,29 @@ export async function handleXmppInbound(params: {
   const groupSystemPrompt = normalizeOptionalString(groupMatch.groupConfig?.systemPrompt);
   const blockStreamingEnabled = resolveChannelStreamingBlockEnabled(account.config);
 
+  // Adjunto entrante: bajarlo y entregárselo al agente como archivo LOCAL
+  // (MediaPath), no como un link que tendría que ir a buscar con un exec
+  // (cada exec dispara una tarjeta de aprobación). Si la descarga falla se
+  // cae al link suelto, que es mejor que nada.
+  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  const downloaded = inboundMediaUrl && stateDir
+    ? await downloadInboundAttachment({ url: inboundMediaUrl, stateDir, runtime })
+    : null;
+  const mediaPayload = inboundMediaUrl
+    ? buildChannelInboundMediaPayload([
+        {
+          url: inboundMediaUrl,
+          ...(downloaded?.path ? { path: downloaded.path } : {}),
+          ...(downloaded?.contentType ? { contentType: downloaded.contentType } : {}),
+        },
+      ])
+    : undefined;
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     RawBody: rawBody,
     CommandBody: rawBody,
-    // Inbound attachment: hand the agent the XEP-0363 download link so it can
-    // fetch/see the file, instead of it only existing as text in the body.
-    ...(inboundMediaUrl ? { MediaUrl: inboundMediaUrl } : {}),
+    ...(mediaPayload ?? {}),
     From: message.isGroup ? `channel:${message.target}` : `xmpp:${senderDisplay}`,
     To: message.isGroup ? `channel:${message.target}` : `xmpp:${peerId}`,
     SessionKey: route.sessionKey,
