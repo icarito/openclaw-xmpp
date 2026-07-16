@@ -31,14 +31,18 @@
 // commands via native-commands.ts.
 import type { Element } from "@xmpp/xml";
 import { xml } from "@xmpp/client";
+import { buildModelsProviderData } from "openclaw/plugin-sdk/models-provider-runtime";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { createActionDispatcher, type XmppAction } from "./actions.js";
 import { buildNativeCommandActions, dispatchNativeCommandText } from "./native-commands.js";
 import { Xep0050Handler } from "./xep-0050.js";
 import { TextualFallback } from "./textual-fallback.js";
-import { buildCorrectionStanza, buildQueryCommandStanza } from "./outbound-render.js";
-import { consumeXmppCommandNode, consumeXmppCommandResponse } from "./command-node-registry.js";
+import { buildCorrectionStanza, buildQueryCommandStanza, buildQuickResponseStanza, resolveInlineButtonsScope } from "./outbound-render.js";
+import { consumeXmppCommandNode, consumeXmppCommandResponse, registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
 import { normalizeXmppOptions, matchOptionReply, shortQuestionId } from "./ask-question.js";
+import { getActiveXmppConnection } from "./connection-registry.js";
+import { isGroupJid } from "./normalize.js";
+import { nextStanzaId } from "./protocol.js";
 import type { RuntimeEnv } from "./runtime-api.js";
 import type { CoreConfig } from "./types.js";
 
@@ -189,6 +193,51 @@ export function registerXmppCommands(params: {
     return response.getChildElements()[0];
   };
 
+  // Render `/models` (and `/models <provider>`) as an inline button menu
+  // instead of the core's plain-text provider listing, mirroring Telegram's
+  // model menu. Providers -> buttons that re-issue `/models <provider>`;
+  // models -> buttons that issue `/model <provider/model>` (which the core
+  // handles). Buttons are command-items (XEP-0050) + quick-responses, exactly
+  // like approval cards, so a button press resolves back to the command text.
+  const sendModelsMenu = async (jid: string, providerArg?: string): Promise<boolean> => {
+    const connection = getActiveXmppConnection(account.accountId);
+    if (!connection?.isConnected()) return false;
+    const data = await buildModelsProviderData(cfg as never).catch(() => null);
+    if (!data) return false;
+
+    type MenuItem = { label: string; command: string };
+    let title: string;
+    let items: MenuItem[];
+    if (!providerArg) {
+      title = "Elige un proveedor:";
+      items = (data.providers ?? []).map((p) => ({ label: p, command: `/models ${p}` }));
+    } else {
+      const models = Array.from(data.byProvider?.get(providerArg) ?? []);
+      if (models.length === 0) return false; // let the core reply handle unknown provider
+      title = `Modelos de ${providerArg} (elige para cambiar):`;
+      items = models.map((m) => ({ label: data.modelNames?.get(m) ?? m, command: `/model ${providerArg}/${m}` }));
+    }
+    if (items.length === 0) return false;
+
+    const type = isGroupJid(jid, account.mucDomain) ? "groupchat" : "chat";
+    const id = nextStanzaId();
+    const botFullJid = `${account.jid}/${account.resource}`;
+    const controls = items.map((it) => ({ label: it.label, value: it.command }));
+    const commandItems = items.map((it, index) => {
+      const node = `cmd:${id}:${index}`;
+      registerXmppCommandNode({ accountId: account.accountId, node, commandText: it.command });
+      for (const responseText of [String(index + 1), it.label, it.command]) {
+        registerXmppCommandResponse({ accountId: account.accountId, jid, responseText, commandText: it.command });
+      }
+      return { jid: botFullJid, node, label: it.label };
+    });
+
+    await connection.send(
+      buildQuickResponseStanza(title, "", controls, jid, type, id, { commandItems }),
+    );
+    return true;
+  };
+
   const handleMessage = (jid: string, body: string, _stanza?: Element): boolean => {
     const responseEntry = consumeXmppCommandResponse(account.accountId, jid, body);
     if (responseEntry) {
@@ -203,6 +252,24 @@ export function registerXmppCommands(params: {
       });
       return true;
     }
+
+    // `/models` (plural) -> inline provider/model menu. `/model` (singular,
+    // the switch command) is intentionally NOT intercepted; it falls through
+    // to the core dispatch. Gated on inline-buttons being enabled for this
+    // account (same capability the rest of the button UI honors).
+    const modelsMatch = body.trim().match(/^\/models(?:\s+(\S+))?\s*$/i);
+    if (modelsMatch && resolveInlineButtonsScope(account.config.capabilities) !== "off") {
+      sendModelsMenu(jid, modelsMatch[1]).then((handled) => {
+        if (!handled) {
+          // Fall back to the normal command flow (plain-text listing).
+          dispatchNativeCommandText({ commandText: body.trim(), fromJid: jid, account, cfg, runtime }).catch(
+            (err) => runtime.error?.(`xmpp /models fallback dispatch failed: ${String(err)}`),
+          );
+        }
+      }).catch((err) => runtime.error?.(`xmpp /models menu failed: ${String(err)}`));
+      return true;
+    }
+
     return textual.handleMessage(jid, body);
   };
 
