@@ -101,7 +101,19 @@ export function buildQuickResponseStanza(
   const quickResponses = options.map((o) => xml("response", quickResponseAttrs(o)));
   const queryItems = metadata?.commandItems?.map((item) => {
     const shortName = item.label.length > 20 ? item.label.slice(0, 18) + "..." : item.label;
-    return xml("item", { jid: item.jid, node: item.node, name: shortName, ...(item.style ? { style: item.style } : {}) });
+    return xml("item", {
+      jid: item.jid,
+      node: item.node,
+      name: shortName,
+      ...(item.style ? { style: item.style } : {}),
+      // Mismo expiry que los <response>: un command-item se contesta por IQ y
+      // no deja mensaje saliente, así que el cliente no puede deducir "ya lo
+      // respondí" por texto. Sin este dato, una tarjeta restaurada del cache
+      // revive una y otra vez si la corrección XEP-0308 no llegó.
+      ...(typeof metadata?.expiresAtMs === "number"
+        ? { "expires-at-ms": String(metadata.expiresAtMs) }
+        : {}),
+    });
   }) ?? [];
   const query = queryItems.length > 0
     ? [xml("query", { xmlns: DISCO_ITEMS_NS, node: COMMAND_NS }, ...queryItems)]
