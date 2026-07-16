@@ -159,7 +159,12 @@ export async function handleXmppInbound(params: {
   });
 
   const rawBody = message.text?.trim() ?? "";
-  if (!rawBody) {
+  // An inbound attachment (XEP-0363 upload link carried as an XEP-0066 OOB
+  // <x><url/></x>) may arrive with an empty body. Don't drop it: monitor.ts
+  // already surfaces the link as message.oobUrl, and it's fed to the agent as
+  // MediaUrl below. Only a message with neither text nor attachment is a no-op.
+  const inboundMediaUrl = message.oobUrl?.trim() || "";
+  if (!rawBody && !inboundMediaUrl) {
     return;
   }
 
@@ -327,11 +332,15 @@ export async function handleXmppInbound(params: {
   });
 
   const fromLabel = message.isGroup ? message.target : senderDisplay;
+  // An attachment-only message has no text; give the envelope a readable stand-in
+  // so the agent sees "there is a file" rather than an empty turn. The real link
+  // travels as MediaUrl in the context below.
+  const envelopeBody = rawBody || (inboundMediaUrl ? `[attachment] ${inboundMediaUrl}` : rawBody);
   const { storePath, body } = buildEnvelope({
     channel: "XMPP",
     from: fromLabel,
     timestamp: message.timestamp,
-    body: rawBody,
+    body: envelopeBody,
   });
 
   const groupSystemPrompt = normalizeOptionalString(groupMatch.groupConfig?.systemPrompt);
@@ -341,6 +350,9 @@ export async function handleXmppInbound(params: {
     Body: body,
     RawBody: rawBody,
     CommandBody: rawBody,
+    // Inbound attachment: hand the agent the XEP-0363 download link so it can
+    // fetch/see the file, instead of it only existing as text in the body.
+    ...(inboundMediaUrl ? { MediaUrl: inboundMediaUrl } : {}),
     From: message.isGroup ? `channel:${message.target}` : `xmpp:${senderDisplay}`,
     To: message.isGroup ? `channel:${message.target}` : `xmpp:${peerId}`,
     SessionKey: route.sessionKey,
