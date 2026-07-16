@@ -70,13 +70,13 @@ export function buildQueryCommandStanza(
 export function buildQuickResponseStanza(
   title: string,
   body: string,
-  options: Array<{ label: string; value: string }>,
+  options: Array<{ label: string; value: string; style?: string }>,
   to: string,
   type: string,
   id: string,
   metadata?: {
     expiresAtMs?: number;
-    commandItems?: Array<{ jid: string; node: string; label: string }>;
+    commandItems?: Array<{ jid: string; node: string; label: string; style?: string }>;
   },
 ): Element {
   const cleanTitle = title.trim();
@@ -89,16 +89,19 @@ export function buildQuickResponseStanza(
     { xmlns: QR_NS, type: "action" },
     ...options.map((o) => xml("body", {}, o.label)),
   );
-  const quickResponseAttrs = (o: { label: string; value: string }) => ({
+  const quickResponseAttrs = (o: { label: string; value: string; style?: string }) => ({
     xmlns: QR_NS,
     value: o.value,
     label: o.label,
+    // Non-standard hint read by color-capable clients (gtk-llm-chat); ignored
+    // by everyone else. One of primary|secondary|success|danger.
+    ...(o.style ? { style: o.style } : {}),
     ...(typeof metadata?.expiresAtMs === "number" ? { "expires-at-ms": String(metadata.expiresAtMs) } : {}),
   });
   const quickResponses = options.map((o) => xml("response", quickResponseAttrs(o)));
   const queryItems = metadata?.commandItems?.map((item) => {
     const shortName = item.label.length > 20 ? item.label.slice(0, 18) + "..." : item.label;
-    return xml("item", { jid: item.jid, node: item.node, name: shortName });
+    return xml("item", { jid: item.jid, node: item.node, name: shortName, ...(item.style ? { style: item.style } : {}) });
   }) ?? [];
   const query = queryItems.length > 0
     ? [xml("query", { xmlns: DISCO_ITEMS_NS, node: COMMAND_NS }, ...queryItems)]

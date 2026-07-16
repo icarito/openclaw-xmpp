@@ -50,48 +50,64 @@ type SendXmppResult = {
   receipt: MessageReceipt;
 };
 
+// Button style forwarded to clients that render colored buttons (Cheogram,
+// gtk-llm-chat). Mirrors the core InteractiveButtonStyle enum.
+type XmppControlStyle = "primary" | "secondary" | "success" | "danger";
+type XmppControl = { label: string; value: string; style?: XmppControlStyle };
+
+function normalizeControlStyle(raw: unknown): XmppControlStyle | undefined {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  return s === "primary" || s === "secondary" || s === "success" || s === "danger" ? s : undefined;
+}
+
 function pushControl(
-  controls: Array<{ label: string; value: string }>,
+  controls: XmppControl[],
   label: unknown,
   value: unknown,
+  style?: unknown,
 ): void {
   const cleanLabel = typeof label === "string" ? label.trim() : "";
   const cleanValue = typeof value === "string" ? value.trim() : "";
   if (cleanLabel && cleanValue && !controls.some((c) => c.value === cleanValue)) {
-    controls.push({ label: cleanLabel, value: cleanValue });
+    const normalizedStyle = normalizeControlStyle(style);
+    controls.push({ label: cleanLabel, value: cleanValue, ...(normalizedStyle ? { style: normalizedStyle } : {}) });
   }
 }
 
-function collectPresentationControls(presentation: MessagePresentation | undefined): Array<{ label: string; value: string }> {
-  const controls: Array<{ label: string; value: string }> = [];
+function collectPresentationControls(presentation: MessagePresentation | undefined): XmppControl[] {
+  const controls: XmppControl[] = [];
   const blocks = Array.isArray(presentation?.blocks) ? presentation.blocks : [];
   for (const block of blocks) {
     if (block.type === "buttons") {
       for (const button of block.buttons ?? []) {
-        pushControl(controls, button.label, resolveMessagePresentationControlValue(button));
+        pushControl(controls, button.label, resolveMessagePresentationControlValue(button), (button as { style?: unknown }).style);
       }
     } else if (block.type === "select") {
       for (const option of block.options ?? []) {
-        pushControl(controls, option.label, resolveMessagePresentationControlValue(option));
+        pushControl(controls, option.label, resolveMessagePresentationControlValue(option), (option as { style?: unknown }).style);
       }
     }
   }
   return controls;
 }
 
-function collectApprovalFallbackControls(fallback: string): Array<{ label: string; value: string }> {
-  const controls: Array<{ label: string; value: string }> = [];
-  const labels: Record<string, string> = {
-    "allow-once": "Allow Once",
-    "allow-always": "Allow Always",
-    deny: "Deny",
+function collectApprovalFallbackControls(fallback: string): XmppControl[] {
+  const controls: XmppControl[] = [];
+  // Convey approval semantics through button color where the client supports
+  // it: allow=success (green), deny=danger (red). Purely additive — the label
+  // and value are unchanged, so text-only clients are unaffected.
+  const labels: Record<string, { label: string; style: XmppControlStyle }> = {
+    "allow-once": { label: "Allow Once", style: "success" },
+    "allow-always": { label: "Allow Always", style: "success" },
+    deny: { label: "Deny", style: "danger" },
   };
   for (const line of fallback.split(/\r?\n/)) {
     const value = line.trim();
     const match = value.match(/^\/approve\s+\S+\s+(\S+)/);
     if (!match) continue;
     const decision = match[1] ?? "";
-    pushControl(controls, labels[decision] ?? decision, value);
+    const meta = labels[decision];
+    pushControl(controls, meta?.label ?? decision, value, meta?.style);
   }
   return controls;
 }
@@ -411,7 +427,7 @@ export async function sendPayloadXmpp(
         ...ttlOptions,
       });
     }
-    return { jid: `${account.jid}/${account.resource}`, node, label: control.label };
+    return { jid: `${account.jid}/${account.resource}`, node, label: control.label, ...(control.style ? { style: control.style } : {}) };
   });
 
   await connection.send(
