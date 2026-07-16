@@ -1,9 +1,18 @@
 // Xmpp plugin module implements send behavior.
 import { client, xml } from "@xmpp/client";
+import crypto from "node:crypto";
 import {
   createMessageReceiptFromOutboundResults,
   type MessageReceipt,
 } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  interactiveReplyToPresentation,
+  normalizeInteractiveReply,
+  renderMessagePresentationFallbackText,
+  resolveMessagePresentationControlValue,
+  type InteractiveReply,
+  type MessagePresentation,
+} from "openclaw/plugin-sdk/interactive-runtime";
 import { loadOutboundMediaFromUrl } from "openclaw/plugin-sdk/outbound-media";
 import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
@@ -11,9 +20,13 @@ import { convertMarkdownTables } from "openclaw/plugin-sdk/text-chunking";
 import { resolveXmppAccount } from "./accounts.js";
 import { bareJid, isGroupJid, normalizeXmppMessagingTarget } from "./normalize.js";
 import { attachmentLabel, markdownToPlain, nextStanzaId, splitForLimit, XMPP_MAX_BODY } from "./protocol.js";
+import { CAPS_FEATURES, CAPS_IDENTITY, CAPS_NODE } from "./xep-0050.js";
 import { getXmppRuntime } from "./runtime.js";
 import { getActiveXmppConnection } from "./connection-registry.js";
 import { uploadFileXmpp } from "./upload.js";
+import { buildQuickResponseStanza, resolveInlineButtonsScope, type XmppInlineButtonsScope } from "./outbound-render.js";
+import { registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
+import { setXmppAccountActivity } from "./activity-registry.js";
 import type { CoreConfig } from "./types.js";
 
 type SendXmppOptions = {
@@ -37,6 +50,117 @@ type SendXmppResult = {
   receipt: MessageReceipt;
 };
 
+function pushControl(
+  controls: Array<{ label: string; value: string }>,
+  label: unknown,
+  value: unknown,
+): void {
+  const cleanLabel = typeof label === "string" ? label.trim() : "";
+  const cleanValue = typeof value === "string" ? value.trim() : "";
+  if (cleanLabel && cleanValue && !controls.some((c) => c.value === cleanValue)) {
+    controls.push({ label: cleanLabel, value: cleanValue });
+  }
+}
+
+function collectPresentationControls(presentation: MessagePresentation | undefined): Array<{ label: string; value: string }> {
+  const controls: Array<{ label: string; value: string }> = [];
+  const blocks = Array.isArray(presentation?.blocks) ? presentation.blocks : [];
+  for (const block of blocks) {
+    if (block.type === "buttons") {
+      for (const button of block.buttons ?? []) {
+        pushControl(controls, button.label, resolveMessagePresentationControlValue(button));
+      }
+    } else if (block.type === "select") {
+      for (const option of block.options ?? []) {
+        pushControl(controls, option.label, resolveMessagePresentationControlValue(option));
+      }
+    }
+  }
+  return controls;
+}
+
+function collectApprovalFallbackControls(fallback: string): Array<{ label: string; value: string }> {
+  const controls: Array<{ label: string; value: string }> = [];
+  const labels: Record<string, string> = {
+    "allow-once": "Allow Once",
+    "allow-always": "Allow Always",
+    deny: "Deny",
+  };
+  for (const line of fallback.split(/\r?\n/)) {
+    const value = line.trim();
+    const match = value.match(/^\/approve\s+\S+\s+(\S+)/);
+    if (!match) continue;
+    const decision = match[1] ?? "";
+    pushControl(controls, labels[decision] ?? decision, value);
+  }
+  return controls;
+}
+
+/**
+ * Decide whether inline buttons may be rendered for a specific target, honoring
+ * the configured scope. `dm`/`group` gate by chat type; `allowlist` gates by
+ * whether the target JID is in the account allowFrom; `all` always allows;
+ * `off` never allows. When this returns false the caller degrades to a plain
+ * numbered-text message (the body always carries a self-sufficient fallback).
+ */
+function inlineButtonsAllowsTarget(params: {
+  scope: XmppInlineButtonsScope;
+  isGroup: boolean;
+  target: string;
+  allowFrom?: Array<string | number>;
+}): boolean {
+  switch (params.scope) {
+    case "all":
+      return true;
+    case "dm":
+      return !params.isGroup;
+    case "group":
+      return params.isGroup;
+    case "allowlist": {
+      const bare = bareJid(params.target).toLowerCase();
+      return (params.allowFrom ?? []).some((entry) => {
+        const normalized = String(entry).trim().toLowerCase();
+        return normalized === "*" || normalized === bare;
+      });
+    }
+    case "off":
+    default:
+      return false;
+  }
+}
+
+function compactApprovalFallbackText(fallback: string): string {
+  const lines = fallback.split(/\r?\n/);
+  const out: string[] = [];
+  let skipApproveBlock = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (
+      line.startsWith("Full id:") ||
+      line.startsWith("Other options:") ||
+      line.startsWith("The effective approval policy")
+    ) {
+      skipApproveBlock = line === "Other options:";
+      continue;
+    }
+    if (line === "Run:" || line === "Other options:") {
+      skipApproveBlock = true;
+      continue;
+    }
+    if (skipApproveBlock) {
+      if (!line || line.startsWith("/approve ")) {
+        continue;
+      }
+      skipApproveBlock = false;
+    }
+    if (line.startsWith("/approve ")) {
+      continue;
+    }
+    out.push(rawLine);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function recordXmppOutboundActivity(accountId: string): void {
   try {
     getXmppRuntime().channel.activity.record({
@@ -51,6 +175,14 @@ function recordXmppOutboundActivity(accountId: string): void {
   }
 }
 
+function logXmppSend(message: string): void {
+  try {
+    getXmppRuntime().log?.(`[xmpp] ${message}`);
+  } catch {
+    // Runtime may not be initialized in isolated tests.
+  }
+}
+
 function resolveTarget(to: string, opts?: SendXmppOptions): string {
   const fromArg = normalizeXmppMessagingTarget(to);
   if (fromArg) {
@@ -61,6 +193,24 @@ function resolveTarget(to: string, opts?: SendXmppOptions): string {
     return bareJid(fromOpt);
   }
   throw new Error(`Invalid XMPP target: ${to}`);
+}
+
+function capsVerHash(): string {
+  const identityStr = `${CAPS_IDENTITY.category}/${CAPS_IDENTITY.type}//${CAPS_IDENTITY.name}<`;
+  const featuresStr = CAPS_FEATURES.map((f) => `${f}<`).join("");
+  return crypto.createHash("sha1").update(identityStr + featuresStr, "utf8").digest("base64");
+}
+
+function buildStatusPresence(to: string, activity: "available" | "processing" | "paused"): ReturnType<typeof xml> {
+  const show = activity === "processing" ? "dnd" : activity === "paused" ? "away" : undefined;
+  const status = activity === "processing" ? "Trabajando" : activity === "paused" ? "Ausente" : "Disponible";
+  return xml(
+    "presence",
+    { to },
+    ...(show ? [xml("show", {}, show)] : []),
+    xml("status", {}, status),
+    xml("c", { xmlns: "http://jabber.org/protocol/caps", hash: "sha-1", node: CAPS_NODE, ver: capsVerHash() }),
+  );
 }
 
 /**
@@ -165,6 +315,122 @@ export async function sendMessageXmpp(
           conversationId: target,
         },
       ],
+      kind: "text",
+      ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
+    }),
+  };
+}
+
+export async function sendPayloadXmpp(
+  to: string,
+  text: string,
+  payload: {
+    presentation?: MessagePresentation;
+    interactive?: InteractiveReply;
+    text?: string | null;
+    mediaUrl?: string | null;
+    channelData?: Record<string, unknown>;
+  },
+  opts: SendXmppOptions,
+): Promise<SendXmppResult> {
+  const cfg = requireRuntimeConfig(opts.cfg, "XMPP payload send") as CoreConfig;
+  const account = resolveXmppAccount({ cfg, accountId: opts.accountId });
+  if (!account.configured) {
+    throw new Error(`XMPP is not configured for account "${account.accountId}".`);
+  }
+  const target = resolveTarget(to, opts);
+  const connection = getActiveXmppConnection(account.accountId);
+  if (!connection?.isConnected()) {
+    throw new Error(`XMPP account "${account.accountId}" has no active connection.`);
+  }
+
+  const xmppData = payload.channelData?.xmpp as Record<string, unknown> | undefined;
+  const presentation =
+    payload.presentation ??
+    (xmppData?.presentation as MessagePresentation | undefined) ??
+    (() => {
+      const interactive = normalizeInteractiveReply(payload.interactive);
+      return interactive ? interactiveReplyToPresentation(interactive) : undefined;
+    })();
+  const fallback = renderMessagePresentationFallbackText({
+    presentation,
+    text: text || payload.text || null,
+    emptyFallback: "Approval required.",
+  });
+  const controls = collectPresentationControls(presentation);
+  if (controls.length === 0) {
+    controls.push(...collectApprovalFallbackControls(fallback));
+  }
+  logXmppSend(
+    `payload controls=${controls.length} labels=${controls.map((c) => c.label).join("|") || "-"} ` +
+    `fallbackApprove=${fallback.includes("/approve ")}`,
+  );
+
+  if (controls.length === 0) {
+    logXmppSend("payload fell back to plain text");
+    return await sendMessageXmpp(to, text || payload.text || "", opts);
+  }
+
+  const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
+
+  // Honor capabilities.inlineButtons scope: when buttons aren't permitted for
+  // this target, degrade to a plain numbered-text message. The compacted
+  // fallback body already lists each option as "N) label" and the command-node
+  // response registry accepts "N"/label/value replies, so users can still act.
+  const inlineButtonsScope = resolveInlineButtonsScope(account.config.capabilities);
+  const buttonsAllowed = inlineButtonsAllowsTarget({
+    scope: inlineButtonsScope,
+    isGroup: type === "groupchat",
+    target,
+    allowFrom: account.config.allowFrom,
+  });
+  if (!buttonsAllowed) {
+    logXmppSend(`payload buttons suppressed (scope=${inlineButtonsScope}, group=${type === "groupchat"}) -> plain text`);
+    return await sendMessageXmpp(to, compactApprovalFallbackText(fallback), opts);
+  }
+
+  const id = nextStanzaId();
+  const approvalData = xmppData?.approval as Record<string, unknown> | undefined;
+  const expiresAtMs = typeof approvalData?.expiresAtMs === "number" ? approvalData.expiresAtMs : undefined;
+  const responseTtlMs = expiresAtMs !== undefined ? Math.max(0, expiresAtMs - Date.now()) : undefined;
+  const ttlOptions = responseTtlMs !== undefined ? { ttlMs: responseTtlMs } : {};
+  const commandItems = controls.map((control, index) => {
+    const node = `cmd:${id}:${index}`;
+    registerXmppCommandNode({
+      accountId: account.accountId,
+      node,
+      commandText: control.value,
+      ...ttlOptions,
+    });
+    for (const responseText of [String(index + 1), control.label, control.value]) {
+      registerXmppCommandResponse({
+        accountId: account.accountId,
+        jid: target,
+        responseText,
+        commandText: control.value,
+        ...ttlOptions,
+      });
+    }
+    return { jid: `${account.jid}/${account.resource}`, node, label: control.label };
+  });
+
+  await connection.send(
+    buildQuickResponseStanza(
+      presentation?.title ?? "OpenClaw",
+      compactApprovalFallbackText(fallback),
+      controls,
+      target,
+      type,
+      id,
+      { ...(expiresAtMs !== undefined ? { expiresAtMs } : {}), commandItems },
+    ),
+  );
+  recordXmppOutboundActivity(account.accountId);
+  return {
+    messageId: id,
+    target,
+    receipt: createMessageReceiptFromOutboundResults({
+      results: [{ channel: "xmpp", messageId: id, conversationId: target }],
       kind: "text",
       ...(opts.replyTo ? { replyToId: opts.replyTo } : {}),
     }),
@@ -281,7 +547,9 @@ export async function sendTypingXmpp(to: string, opts: SendXmppOptions): Promise
   const connection = getActiveXmppConnection(account.accountId);
   if (!connection?.isConnected()) return;
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
+  setXmppAccountActivity(account.accountId, "busy", target);
   try {
+    if (type === "chat") await connection.send(buildStatusPresence(target, "processing"));
     await connection.send(
       xml("message", { type, to: target }, xml("composing", { xmlns: "http://jabber.org/protocol/chatstates" })),
     );
@@ -303,10 +571,12 @@ export async function clearTypingXmpp(to: string, opts: SendXmppOptions): Promis
   const connection = getActiveXmppConnection(account.accountId);
   if (!connection?.isConnected()) return;
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
+  setXmppAccountActivity(account.accountId, "available", target);
   try {
     await connection.send(
       xml("message", { type, to: target }, xml("active", { xmlns: "http://jabber.org/protocol/chatstates" })),
     );
+    if (type === "chat") await connection.send(buildStatusPresence(target, "available"));
   } catch {
     // best-effort
   }

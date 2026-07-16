@@ -94,7 +94,7 @@ export function resolveXmppAccount(params: {
       (accountId === DEFAULT_ACCOUNT_ID ? process.env.XMPP_SERVICE?.trim() : "") ||
       "xmpp://127.0.0.1:5222"
     ).trim();
-    const resource = (merged.resource?.trim() || "openclaw").trim();
+    const resource = (merged.resource?.trim() || `openclaw-${accountId}`).trim();
     const mucDomain = (
       merged.mucDomain?.trim() ||
       (accountId === DEFAULT_ACCOUNT_ID ? process.env.XMPP_MUC_DOMAIN?.trim() : "") ||

@@ -6,6 +6,30 @@
   "channels": ["xmpp"],
   "channelConfigs": {
     "xmpp": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "capabilities": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "inlineButtons": {
+                    "type": "string",
+                    "enum": ["off", "dm", "group", "all", "allowlist"]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
       "label": "XMPP",
       "selectionLabel": "XMPP (Jabber JID + password)",
       "detailLabel": "XMPP",
@@ -28,7 +52,26 @@
   },
   "configSchema": {
     "type": "object",
-    "additionalProperties": false,
-    "properties": {}
+    "additionalProperties": true,
+    "properties": {
+      "capabilities": {
+        "anyOf": [
+          {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "inlineButtons": {
+                "type": "string",
+                "enum": ["off", "dm", "group", "all", "allowlist"]
+              }
+            }
+          }
+        ]
+      }
+    }
   }
 }

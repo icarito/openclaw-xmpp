@@ -11,6 +11,33 @@ import type { Element } from "@xmpp/xml";
 
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
 const COMMAND_NS = "http://jabber.org/protocol/commands";
+const QR_NS = "urn:xmpp:quick-response:0";
+
+export type XmppInlineButtonsScope = "off" | "dm" | "group" | "all" | "allowlist";
+
+/**
+ * Resolve the configured inline-buttons scope from an account's `capabilities`.
+ * Accepts both the legacy array form (`["inlineButtons"]` => "all") and the
+ * object form (`{ inlineButtons: "dm" | ... }`). Anything unrecognized => "off".
+ * Pure so both the send path (per-message gating) and channel.ts (agent
+ * capability advertisement) share one source of truth.
+ */
+export function resolveInlineButtonsScope(capabilities: unknown): XmppInlineButtonsScope {
+  if (Array.isArray(capabilities)) {
+    return capabilities.some((entry) => String(entry).trim().toLowerCase() === "inlinebuttons")
+      ? "all"
+      : "off";
+  }
+  if (capabilities && typeof capabilities === "object") {
+    const raw = String((capabilities as { inlineButtons?: unknown }).inlineButtons ?? "")
+      .trim()
+      .toLowerCase();
+    if (raw === "dm" || raw === "group" || raw === "all" || raw === "allowlist") {
+      return raw;
+    }
+  }
+  return "off";
+}
 
 /**
  * Build a `<message>` stanza with an inline `<query>` disco#items element
@@ -37,8 +64,46 @@ export function buildQueryCommandStanza(
   });
 
   const query = xml("query", { xmlns: DISCO_ITEMS_NS, node: COMMAND_NS }, ...items);
-
   return xml("message", { type, to, id }, xml("body", {}, bodyText), query);
+}
+
+export function buildQuickResponseStanza(
+  title: string,
+  body: string,
+  options: Array<{ label: string; value: string }>,
+  to: string,
+  type: string,
+  id: string,
+  metadata?: {
+    expiresAtMs?: number;
+    commandItems?: Array<{ jid: string; node: string; label: string }>;
+  },
+): Element {
+  const cleanTitle = title.trim();
+  const cleanBody = body.trim();
+  const bodyText = cleanBody.toLowerCase().startsWith(cleanTitle.toLowerCase())
+    ? cleanBody
+    : `${cleanTitle}${cleanBody ? `\n\n${cleanBody}` : ""}`;
+  const quickResponseReference = xml(
+    "reference",
+    { xmlns: QR_NS, type: "action" },
+    ...options.map((o) => xml("body", {}, o.label)),
+  );
+  const quickResponseAttrs = (o: { label: string; value: string }) => ({
+    xmlns: QR_NS,
+    value: o.value,
+    label: o.label,
+    ...(typeof metadata?.expiresAtMs === "number" ? { "expires-at-ms": String(metadata.expiresAtMs) } : {}),
+  });
+  const quickResponses = options.map((o) => xml("response", quickResponseAttrs(o)));
+  const queryItems = metadata?.commandItems?.map((item) => {
+    const shortName = item.label.length > 20 ? item.label.slice(0, 18) + "..." : item.label;
+    return xml("item", { jid: item.jid, node: item.node, name: shortName });
+  }) ?? [];
+  const query = queryItems.length > 0
+    ? [xml("query", { xmlns: DISCO_ITEMS_NS, node: COMMAND_NS }, ...queryItems)]
+    : [];
+  return xml("message", { type, to, id }, xml("body", {}, bodyText), quickResponseReference, ...quickResponses, ...query);
 }
 
 /**

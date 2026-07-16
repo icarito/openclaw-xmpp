@@ -3,5 +3,5 @@
 // that only need plugin metadata never pull in @xmpp/client, the monitor
 // loop, or the command layer. Mirrors IRC's channel-runtime.js contract
 // (loaded via createLazyRuntimeModule in gateway.ts / channel.ts).
-export { clearTypingXmpp, sendEditXmpp, sendFileXmpp, sendMessageXmpp, sendTypingXmpp } from "./send.js";
+export { clearTypingXmpp, sendEditXmpp, sendFileXmpp, sendMessageXmpp, sendPayloadXmpp, sendTypingXmpp } from "./send.js";
 export { monitorXmppProvider } from "./monitor.js";

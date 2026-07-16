@@ -21,6 +21,7 @@ import {
   deliverFormattedTextWithAttachments,
   type OutboundReplyPayload,
 } from "openclaw/plugin-sdk/reply-payload";
+import type { MessagePresentation } from "openclaw/plugin-sdk/interactive-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import {
   GROUP_POLICY_BLOCKED_LABEL,
@@ -33,7 +34,7 @@ import type { ResolvedXmppAccount } from "./accounts.js";
 import { bareJid, buildXmppAllowlistCandidates, normalizeXmppAllowEntry } from "./normalize.js";
 import { resolveXmppGroupMatch, resolveXmppGroupRequireMention } from "./policy.js";
 import { getXmppRuntime } from "./runtime.js";
-import { sendMessageXmpp } from "./send.js";
+import { sendMessageXmpp, sendPayloadXmpp } from "./send.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
 
 const CHANNEL_ID = "xmpp" as const;
@@ -99,6 +100,31 @@ async function deliverXmppReply(params: {
   sendReply?: (target: string, text: string, replyToId?: string) => Promise<void>;
   statusSink?: (patch: { lastOutboundAt?: number }) => void;
 }) {
+  const payload = params.payload as OutboundReplyPayload & {
+    presentation?: unknown;
+    text?: string | null;
+    mediaUrl?: string | null;
+    channelData?: Record<string, unknown>;
+  };
+  if (payload.presentation) {
+    await sendPayloadXmpp(
+      params.target,
+      payload.text ?? "",
+      {
+        presentation: payload.presentation as MessagePresentation,
+        text: payload.text ?? null,
+        mediaUrl: payload.mediaUrl ?? null,
+        channelData: payload.channelData,
+      },
+      {
+        cfg: params.cfg,
+        accountId: params.accountId,
+      },
+    );
+    params.statusSink?.({ lastOutboundAt: Date.now() });
+    return;
+  }
+
   await deliverFormattedTextWithAttachments({
     payload: params.payload,
     send: async ({ text, replyToId }) => {

@@ -1,6 +1,9 @@
 // Xmpp plugin module implements monitor behavior.
 import type { Element } from "@xmpp/xml";
 import { xml } from "@xmpp/client";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveXmppAccount } from "./accounts.js";
@@ -25,6 +28,63 @@ type XmppMonitorOptions = {
 };
 
 const XMPP_MONITOR_RECONNECT_DELAY_MS = 1000;
+const XMPP_INBOUND_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
+
+type RecentInboundEntry = { key: string; at: number };
+
+function hashText(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 24);
+}
+
+function resolveDedupePath(accountId: string): string | null {
+  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  if (!stateDir) return null;
+  return join(stateDir, "channel-cache", "xmpp", `${accountId}-recent-inbound.json`);
+}
+
+function loadRecentInbound(path: string | null, now: number): Map<string, number> {
+  const entries = new Map<string, number>();
+  if (!path || !existsSync(path)) return entries;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { entries?: RecentInboundEntry[] };
+    for (const entry of raw.entries ?? []) {
+      if (typeof entry.key !== "string" || typeof entry.at !== "number") continue;
+      if (now - entry.at <= XMPP_INBOUND_DEDUPE_WINDOW_MS) entries.set(entry.key, entry.at);
+    }
+  } catch {
+    // Corrupt dedupe state must not block inbound chat.
+  }
+  return entries;
+}
+
+function saveRecentInbound(path: string | null, entries: Map<string, number>, now: number): void {
+  if (!path) return;
+  try {
+    const filtered = [...entries.entries()]
+      .filter(([, at]) => now - at <= XMPP_INBOUND_DEDUPE_WINDOW_MS)
+      .map(([key, at]) => ({ key, at }));
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(`${path}.tmp`, JSON.stringify({ entries: filtered }, null, 2) + "\n");
+    renameSync(`${path}.tmp`, path);
+  } catch {
+    // Best-effort only. The live handler can still process messages safely.
+  }
+}
+
+function buildInboundDedupeKeys(stanza: Element, type: string, platformId: string, body: string, oobUrl: string | null): string[] {
+  const keys: string[] = [];
+  const stanzaId = stanza.attrs.id;
+  if (typeof stanzaId === "string" && stanzaId.trim()) {
+    keys.push(`id:${type}:${platformId}:${stanzaId}`);
+  }
+
+  // Body-only dedupe is intentionally limited to delayed replay: without a
+  // stanza id, a user can legitimately send the same short text twice.
+  if (stanza.getChild("delay", "urn:xmpp:delay")) {
+    keys.push(`delayed:${type}:${platformId}:${hashText(`${body}\0${oobUrl ?? ""}`)}`);
+  }
+  return keys;
+}
 
 export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ stop: () => void }> {
   const core = getXmppRuntime();
@@ -64,6 +124,8 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
   }
 
   const botNick = account.jid.split("@")[0]!;
+  const dedupePath = resolveDedupePath(account.accountId);
+  const recentInbound = loadRecentInbound(dedupePath, Date.now());
 
   const sendPlain = (toPlatformId: string, text: string): void => {
     if (!connection?.isConnected()) return;
@@ -156,8 +218,10 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
   }
 
   async function handleStanza(stanza: Element, commandRuntime: XmppCommandRuntime): Promise<void> {
-    // Auto-accept presence subscription requests so rosters in clients
-    // like Gajim/Dino don't get stuck pending.
+    // Auto-accept presence subscription requests so rosters in clients like
+    // Gajim/Dino don't get stuck pending. Do not send a reciprocal subscribe
+    // here: several bot accounts may see each other's requests, and mirroring
+    // subscribe stanzas from this handler can create a presence ping-pong.
     if (stanza.is("presence")) {
       const ptype = stanza.attrs.type;
       const from = stanza.attrs.from as string | undefined;
@@ -165,7 +229,6 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       const bare = bareJid(from);
       if (ptype === "subscribe") {
         await connection.send(xml("presence", { to: bare, type: "subscribed" }));
-        await connection.send(xml("presence", { to: bare, type: "subscribe" }));
       } else if (ptype === "unsubscribe") {
         await connection.send(xml("presence", { to: bare, type: "unsubscribed" }));
       }
@@ -201,6 +264,15 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       const senderNick = from.split("/")[1];
       if (senderNick === botNick) return;
     }
+
+    const dedupeKeys = buildInboundDedupeKeys(stanza, type, platformId, body, oobUrl);
+    if (dedupeKeys.some((key) => recentInbound.has(key))) {
+      logger.info(`[${account.accountId}] dropped duplicate message from ${from}`);
+      return;
+    }
+    const dedupeNow = Date.now();
+    for (const key of dedupeKeys) recentInbound.set(key, dedupeNow);
+    saveRecentInbound(dedupePath, recentInbound, dedupeNow);
 
     // XEP-0050 textual fallback (/nc ...) and pending-session interception,
     // plus /session commands -- all handled by commands.ts, never forwarded

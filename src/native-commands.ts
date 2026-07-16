@@ -150,7 +150,7 @@ export function buildNativeCommandActions(params: {
  * unauthorized JID must be gated exactly the same way whether it types
  * "/compact" or taps the XEP-0050 menu entry for it.
  */
-async function dispatchNativeCommandText(params: {
+export async function dispatchNativeCommandText(params: {
   commandText: string;
   fromJid: string;
   account: ResolvedXmppAccount;

@@ -86,6 +86,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
   const joinedRooms = new Set<string>();
 
   const log = options.log ?? {};
+  const connectionLabel = `${account.jid}/${account.resource || "openclaw"}`;
 
   xmpp.on("error", (err: Error) => {
     log.warn?.(`XMPP connection error: ${err.message}`);
@@ -93,7 +94,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
   });
 
   xmpp.on("status", (status: string) => {
-    log.debug?.(`XMPP connection status: ${status}`);
+    log.info?.(`XMPP connection status: ${status} (${connectionLabel})`);
   });
 
   // @xmpp/reconnect (bundled in @xmpp/client) already retries on
@@ -158,7 +159,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     rejoinRooms();
     stopPing();
     pingTimer = setInterval(() => void sendPing(), PING_INTERVAL_MS);
-    log.info?.(`XMPP channel connected as ${account.jid}`);
+    log.info?.(`XMPP channel connected as ${connectionLabel}`);
     // NOTE(xmpp-migration): pass `connection` (constructed below, before
     // `xmpp.start()`) rather than relying on the caller's own
     // `await connectXmppClient(...)` return value — @xmpp/client can emit
@@ -172,7 +173,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
   xmpp.on("offline", () => {
     connected = false;
     stopPing();
-    log.warn?.("XMPP channel disconnected");
+    log.warn?.(`XMPP channel disconnected (${connectionLabel})`);
     options.onOffline?.();
   });
 

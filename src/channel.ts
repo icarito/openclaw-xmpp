@@ -2,6 +2,12 @@
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import { formatNormalizedAllowFromEntries } from "openclaw/plugin-sdk/allow-from";
 import {
+  buildExecApprovalPendingReplyPayload,
+  buildPluginApprovalPendingReplyPayload,
+  resolveExecApprovalCommandDisplay,
+  resolveExecApprovalRequestAllowedDecisions,
+} from "openclaw/plugin-sdk/approval-runtime";
+import {
   adaptScopedAccountAccessor,
   createScopedChannelConfigAdapter,
   createScopedDmSecurityResolver,
@@ -37,6 +43,7 @@ import { startXmppGatewayAccount } from "./gateway.js";
 import { xmppMessageAdapter } from "./message-adapter.js";
 import { bareJid, looksLikeXmppTargetId, normalizeXmppAllowEntry, normalizeXmppMessagingTarget, resolveXmppOutboundSessionRoute } from "./normalize.js";
 import { xmppOutboundBaseAdapter } from "./outbound-base.js";
+import { resolveInlineButtonsScope } from "./outbound-render.js";
 import { resolveXmppGroupRequireMention, resolveXmppGroupToolPolicy } from "./policy.js";
 import { probeXmpp } from "./probe.js";
 import { collectRuntimeConfigAssignments, secretTargetRegistryEntries } from "./secret-contract.js";
@@ -133,6 +140,42 @@ const collectXmppSecurityWarnings = composeAccountWarningCollectors<
     "- channels.xmpp.mucRooms is set but channels.xmpp.mucDomain is empty; rooms will not be recognized as groups (outbound replies will use type=chat instead of type=groupchat).",
 );
 
+function isXmppApprovalAuthorizedSender(params: {
+  cfg: CoreConfig;
+  accountId?: string | null;
+  senderId?: string | null;
+}): boolean {
+  const sender = normalizeXmppAllowEntry(params.senderId ?? "");
+  if (!sender) return false;
+  const account = resolveXmppAccount({ cfg: params.cfg, accountId: params.accountId ?? undefined });
+  return (account.config.allowFrom ?? []).some((entry) => {
+    const normalized = normalizeXmppAllowEntry(String(entry));
+    return normalized === "*" || normalized === sender;
+  });
+}
+
+function isXmppInlineButtonsEnabled(params: { cfg: CoreConfig; accountId?: string | null }): boolean {
+  const account = resolveXmppAccount({ cfg: params.cfg, accountId: params.accountId ?? undefined });
+  return resolveInlineButtonsScope(account.config.capabilities) !== "off";
+}
+
+function readFirstString(params: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function readObjectParam(params: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = params[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createChatChannelPlugin({
   base: {
     id: "xmpp",
@@ -150,6 +193,15 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
     },
     reload: { configPrefixes: ["channels.xmpp"] },
     configSchema: XmppChannelConfigSchema,
+    agentPrompt: {
+      messageToolCapabilities: ({ cfg, accountId }) =>
+        isXmppInlineButtonsEnabled({
+          cfg: cfg as CoreConfig,
+          accountId,
+        })
+          ? ["inlineButtons"]
+          : [],
+    },
     config: {
       ...xmppConfigAdapter,
       hasConfiguredState: ({ env }) =>
@@ -169,6 +221,53 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
             passwordSource: account.passwordSource,
           },
         }),
+    },
+    approvalCapability: {
+      authorizeActorAction: ({ cfg, accountId, senderId }) => ({
+        authorized: isXmppApprovalAuthorizedSender({
+          cfg: cfg as CoreConfig,
+          accountId,
+          senderId,
+        }),
+      }),
+      render: {
+        exec: {
+          buildPendingPayload: ({ request, nowMs }) => {
+            const payload = buildExecApprovalPendingReplyPayload({
+              approvalId: request.id,
+              approvalSlug: request.id.slice(0, 8),
+              approvalCommandId: request.id,
+              warningText: request.request.warningText ?? undefined,
+              command: resolveExecApprovalCommandDisplay(request.request).commandText,
+              cwd: request.request.cwd ?? undefined,
+              host: request.request.host === "node" ? "node" : "gateway",
+              nodeId: request.request.nodeId ?? undefined,
+              allowedDecisions: resolveExecApprovalRequestAllowedDecisions(request.request),
+              expiresAtMs: request.expiresAtMs,
+              nowMs,
+            });
+            return {
+              ...payload,
+              channelData: {
+                ...(payload.channelData ?? {}),
+                xmpp: {
+                  ...((payload.channelData?.xmpp as Record<string, unknown> | undefined) ?? {}),
+                  approval: {
+                    expiresAtMs: request.expiresAtMs,
+                  },
+                },
+              },
+            };
+          },
+        },
+        plugin: {
+          buildPendingPayload: ({ request, nowMs }) =>
+            buildPluginApprovalPendingReplyPayload({
+              request,
+              nowMs,
+            }),
+        },
+      },
     },
     secrets: {
       secretTargetRegistryEntries,
@@ -205,6 +304,64 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
       targetResolver: {
         looksLikeId: looksLikeXmppTargetId,
         hint: "<user@domain|room@conference.domain>",
+      },
+    },
+    actions: {
+      describeMessageTool: () => ({
+        actions: ["send"],
+        capabilities: ["presentation"],
+      }),
+      supportsAction: ({ action }) => action === "send",
+      isToolDeliveryAction: ({ args }) =>
+        Boolean(readFirstString(args, ["target", "to", "channelId", "chatId"])),
+      handleAction: async ({ action, params, cfg, accountId }) => {
+        if (action !== "send") {
+          throw new Error(`XMPP action ${action} not supported`);
+        }
+        const target = readFirstString(params, ["target", "to", "channelId", "chatId"]);
+        if (!target) {
+          throw new Error("XMPP send requires target or to.");
+        }
+        const message = readFirstString(params, ["message", "text", "content", "caption"]);
+        const mediaUrl = readFirstString(params, ["media", "mediaUrl", "path", "filePath", "fileUrl"]);
+        const presentation = readObjectParam(params, "presentation");
+        const interactive = readObjectParam(params, "interactive");
+        const channelData = readObjectParam(params, "channelData");
+        const runtime = await loadXmppChannelRuntime();
+        const result =
+          presentation || interactive || channelData
+            ? await runtime.sendPayloadXmpp(
+                target,
+                message,
+                {
+                  text: message,
+                  ...(presentation ? { presentation: presentation as never } : {}),
+                  ...(interactive ? { interactive: interactive as never } : {}),
+                  ...(channelData ? { channelData } : {}),
+                },
+                {
+                  cfg: cfg as CoreConfig,
+                  accountId: accountId ?? undefined,
+                },
+              )
+            : mediaUrl
+              ? await runtime.sendFileXmpp(target, message, mediaUrl, {
+                  cfg: cfg as CoreConfig,
+                  accountId: accountId ?? undefined,
+                })
+              : await runtime.sendMessageXmpp(target, message, {
+                  cfg: cfg as CoreConfig,
+                  accountId: accountId ?? undefined,
+                });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Sent XMPP message ${result.messageId}`,
+            },
+          ],
+          details: result,
+        };
       },
     },
     message: xmppMessageAdapter,

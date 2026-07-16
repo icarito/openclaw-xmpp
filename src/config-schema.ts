@@ -11,6 +11,12 @@ import {
 import { z } from "zod";
 import { xmppChannelConfigUiHints } from "./config-ui-hints.js";
 
+const XmppInlineButtonsScopeSchema = z.enum(["off", "dm", "group", "all", "allowlist"]);
+const XmppCapabilitiesSchema = z.union([
+  z.array(z.string()),
+  z.object({ inlineButtons: XmppInlineButtonsScopeSchema.optional() }).strict(),
+]);
+
 const XmppGroupSchema = z
   .object({
     requireMention: z.boolean().optional(),
@@ -41,6 +47,7 @@ const XmppAccountSchemaBase = z
     groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
     groups: z.record(z.string(), XmppGroupSchema.optional()).optional(),
     mentionPatterns: z.array(z.string()).optional(),
+    capabilities: XmppCapabilitiesSchema.optional(),
     markdown: MarkdownConfigSchema,
     contextWindowTokens: z.number().int().positive().optional(),
     ...ReplyRuntimeConfigSchemaShape,

@@ -27,6 +27,7 @@ import {
 const COMMAND_NS = "http://jabber.org/protocol/commands";
 const DISCO_INFO_NS = "http://jabber.org/protocol/disco#info";
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
+const OPENCLAW_TELEMETRY_NOTIFY_NS = "urn:openclaw:telemetry:0+notify";
 
 // Must mirror CAPS_IDENTITY/CAPS_FEATURES in client.ts's presence caps
 // builder -- the ver hash a client caches from <c/> in presence is only
@@ -34,7 +35,12 @@ const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
 // and feature set.
 export const CAPS_NODE = "https://github.com/openclaw/openclaw";
 export const CAPS_IDENTITY = { category: "automation", type: "command-list", name: "OpenClaw" };
-export const CAPS_FEATURES = [COMMAND_NS, DISCO_INFO_NS, DISCO_ITEMS_NS].sort();
+export const CAPS_FEATURES = [
+  COMMAND_NS,
+  DISCO_INFO_NS,
+  DISCO_ITEMS_NS,
+  OPENCLAW_TELEMETRY_NOTIFY_NS,
+].sort();
 
 const XEP0004_COMMAND_FORMS_ENABLED = true;
 

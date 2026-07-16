@@ -11,6 +11,13 @@ import type {
   BaseProbeResult,
 } from "./runtime-api.js";
 
+export type XmppInlineButtonsScope = "off" | "dm" | "group" | "all" | "allowlist";
+export type XmppCapabilitiesConfig =
+  | string[]
+  | {
+      inlineButtons?: XmppInlineButtonsScope;
+    };
+
 export type XmppChannelConfig = {
   requireMention?: boolean;
   tools?: GroupToolPolicyConfig;
@@ -35,7 +42,7 @@ export type XmppAccountConfig = {
   passwordFile?: string;
   /** Connection URI, e.g. "xmpp://127.0.0.1:5222". Defaults to derived from jid domain + srv/BOSH discovery via @xmpp/client. */
   service?: string;
-  /** Resource used on connect (defaults to "openclaw"). */
+  /** Resource used on connect (defaults to "openclaw-<accountId>"). */
   resource?: string;
   /** Domain hosting MUC rooms this account should treat as group chats, e.g. "conference.example.org". */
   mucDomain?: string;
@@ -56,6 +63,7 @@ export type XmppAccountConfig = {
   streaming?: ChannelDeliveryStreamingConfig;
   responsePrefix?: string;
   mediaMaxMb?: number;
+  capabilities?: XmppCapabilitiesConfig;
   /** Context-window size used to compute the /context percentage. */
   contextWindowTokens?: number;
 };

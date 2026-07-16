@@ -10,6 +10,10 @@ export default defineBundledChannelEntry({
     specifier: "./channel-plugin-api.js",
     exportName: "xmppPlugin",
   },
+  outbound: {
+    specifier: "./src/message-adapter.js",
+    exportName: "xmppMessageAdapter",
+  },
   secrets: {
     specifier: "./secret-contract-api.js",
     exportName: "channelSecrets",

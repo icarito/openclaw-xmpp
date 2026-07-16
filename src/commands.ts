@@ -33,10 +33,11 @@ import type { Element } from "@xmpp/xml";
 import { xml } from "@xmpp/client";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { createActionDispatcher, type XmppAction } from "./actions.js";
-import { buildNativeCommandActions } from "./native-commands.js";
+import { buildNativeCommandActions, dispatchNativeCommandText } from "./native-commands.js";
 import { Xep0050Handler } from "./xep-0050.js";
 import { TextualFallback } from "./textual-fallback.js";
 import { buildCorrectionStanza, buildQueryCommandStanza } from "./outbound-render.js";
+import { consumeXmppCommandNode, consumeXmppCommandResponse } from "./command-node-registry.js";
 import { normalizeXmppOptions, matchOptionReply, shortQuestionId } from "./ask-question.js";
 import type { RuntimeEnv } from "./runtime-api.js";
 import type { CoreConfig } from "./types.js";
@@ -152,6 +153,34 @@ export function registerXmppCommands(params: {
       return iqResult.getChildElements()[0];
     }
 
+    if (cmdNode && cmdNode.startsWith("cmd:")) {
+      const from = (stanza.attrs.from as string) || "";
+      const id = (stanza.attrs.id as string) || "";
+      const entry = consumeXmppCommandNode(account.accountId, cmdNode);
+      if (entry) {
+        dispatchNativeCommandText({
+          commandText: entry.commandText,
+          fromJid: from,
+          account,
+          cfg,
+          runtime,
+        }).catch((err) => {
+          runtime.error?.(`xmpp command button dispatch failed: ${String(err)}`);
+        });
+      }
+      const sessionId = `oc-cmd-${Date.now().toString(36)}`;
+      const iqResult = xml(
+        "iq",
+        { type: "result", id, to: from },
+        xml(
+          "command",
+          { xmlns: COMMAND_NS, node: cmdNode, sessionid: sessionId, status: "completed" },
+          xml("note", { type: entry ? "info" : "warn" }, entry ? "Command submitted." : "Command expired."),
+        ),
+      );
+      return iqResult.getChildElements()[0];
+    }
+
     const response = await xep0050.handleIq(stanza);
     if (!response) return undefined;
     if (response.attrs.type === "error") {
@@ -161,6 +190,19 @@ export function registerXmppCommands(params: {
   };
 
   const handleMessage = (jid: string, body: string, _stanza?: Element): boolean => {
+    const responseEntry = consumeXmppCommandResponse(account.accountId, jid, body);
+    if (responseEntry) {
+      dispatchNativeCommandText({
+        commandText: responseEntry.commandText,
+        fromJid: jid,
+        account,
+        cfg,
+        runtime,
+      }).catch((err) => {
+        runtime.error?.(`xmpp quick response dispatch failed: ${String(err)}`);
+      });
+      return true;
+    }
     return textual.handleMessage(jid, body);
   };
 

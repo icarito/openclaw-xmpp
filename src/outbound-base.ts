@@ -8,6 +8,28 @@ export const xmppOutboundBaseAdapter = {
   chunker: chunkTextForOutbound,
   chunkerMode: "markdown" as const,
   textChunkLimit: 4000,
+  presentationCapabilities: {
+    buttons: true,
+    selects: true,
+    context: true,
+    divider: true,
+  },
+  renderPresentation: async ({
+    payload,
+    presentation,
+  }: {
+    payload: { channelData?: Record<string, unknown> };
+    presentation: unknown;
+  }) => ({
+    ...payload,
+    channelData: {
+      ...(payload.channelData ?? {}),
+      xmpp: {
+        ...((payload.channelData?.xmpp as Record<string, unknown> | undefined) ?? {}),
+        presentation,
+      },
+    },
+  }),
   // XMPP <body> is plain text; markdownToPlain() in protocol.ts handles the
   // syntax stripping at send time. Still run the canonical delivery
   // sanitizer first so internal tool traces are dropped before formatting.
