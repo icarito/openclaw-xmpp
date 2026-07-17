@@ -10,6 +10,15 @@ The XMPP extension exposes two ad-hoc command nodes:
 Both commands are host-side config edits. They do not start an agent turn, so
 changing approval policy cannot itself create an approval loop.
 
+They are available through XEP-0050 when the client targets the gateway's full
+resource JID, and through the universal textual fallback:
+
+```text
+/oc approval-bypass on
+/oc approval-bypass off
+/oc approval-mode status
+```
+
 Supported `mode` values:
 
 - `status`: report the current exec policy.

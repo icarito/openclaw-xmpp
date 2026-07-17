@@ -22,6 +22,62 @@ interface PendingTextualCommand {
   currentParamIdx: number;
 }
 
+function splitInlineArgs(input: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]!;
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) args.push(current);
+  return args;
+}
+
+function normalizeParamValue(
+  param: PendingTextualCommand["remaining"][number],
+  raw: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  const trimmed = raw.trim();
+  if (param.type === "boolean") {
+    const lc = trimmed.toLowerCase();
+    if (lc === "yes" || lc === "y" || lc === "true" || lc === "1" || lc === "on") return { ok: true, value: "true" };
+    if (lc === "no" || lc === "n" || lc === "false" || lc === "0" || lc === "off") return { ok: true, value: "false" };
+    return { ok: false, error: `Value for ${param.label} must be yes/no.` };
+  }
+  if (param.options && param.options.length > 0) {
+    const num = Number(trimmed);
+    if (Number.isInteger(num) && num >= 1 && num <= param.options.length) {
+      return { ok: true, value: param.options[num - 1]!.value };
+    }
+    const lc = trimmed.toLowerCase();
+    const match = param.options.find((o) => o.label.toLowerCase() === lc || o.value.toLowerCase() === lc);
+    if (match) return { ok: true, value: match.value };
+    return { ok: false, error: `Option not recognized for ${param.label}.` };
+  }
+  if (!trimmed && param.required) return { ok: false, error: `${param.label} is required.` };
+  return { ok: true, value: trimmed };
+}
+
 export interface TextualFallbackOptions {
   dispatcher: ActionDispatcher;
   sendPlain: (to: string, text: string) => void;
@@ -63,9 +119,15 @@ export class TextualFallback {
       return true;
     }
 
-    const action = this.dispatcher.getAction(arg);
+    const [nodeArg, ...inlineArgs] = splitInlineArgs(arg);
+    const action = this.dispatcher.getAction(nodeArg ?? "");
     if (!action) {
-      this.sendPlain(jid, `Command "${arg}" not found.\n\nUse /oc or !oc to see available commands.`);
+      this.sendPlain(jid, `Command "${nodeArg ?? arg}" not found.\n\nUse /oc or !oc to see available commands.`);
+      return true;
+    }
+
+    if (inlineArgs.length > 0) {
+      this.executeInlineArgs(jid, action, inlineArgs);
       return true;
     }
 
@@ -85,6 +147,28 @@ export class TextualFallback {
 
     this.startCommand(jid, action);
     return true;
+  }
+
+  private executeInlineArgs(jid: string, action: XmppAction, args: string[]): void {
+    const params: Record<string, string> = {};
+    for (let i = 0; i < action.params.length; i++) {
+      const param = action.params[i]!;
+      const raw = args[i] ?? "";
+      if (!raw && !param.required) continue;
+      const parsed = normalizeParamValue(param, raw);
+      if (parsed.ok === false) {
+        this.sendPlain(jid, `${parsed.error}\n\nUse /oc ${action.node} to run it interactively.`);
+        return;
+      }
+      params[param.name] = parsed.value;
+    }
+    if (args.length > action.params.length) {
+      this.sendPlain(jid, `Too many arguments for ${action.name}.\n\nUse /oc ${action.node} to run it interactively.`);
+      return;
+    }
+    void Promise.resolve(action.handler(params, { fromJid: jid, accountId: this.accountId }))
+      .then((result) => this.sendPlain(jid, `${action.name} completed:\n${result}`))
+      .catch((err) => this.sendPlain(jid, `Error in ${action.name}: ${String(err)}`));
   }
 
   private showHelp(jid: string): void {

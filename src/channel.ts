@@ -354,14 +354,26 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
     },
     actions: {
       describeMessageTool: () => ({
-        actions: ["send"],
+        actions: ["send", "read"],
         capabilities: ["presentation"],
       }),
-      supportsAction: ({ action }) => action === "send",
+      supportsAction: ({ action }) => action === "send" || action === "read",
       resolveExecutionMode: ({ action }) => (action === "send" ? "gateway" : "local"),
       isToolDeliveryAction: ({ args }) =>
         Boolean(readFirstString(args, ["target", "to", "channelId", "chatId"])),
       handleAction: async ({ action, params, cfg, accountId, mediaAccess, mediaLocalRoots, mediaReadFile }) => {
+        if (action === "read") {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  "XMPP message read is not available from the gateway. Use the current conversation context and ask the user for any missing message text.",
+              },
+            ],
+            details: {},
+          };
+        }
         if (action !== "send") {
           throw new Error(`XMPP action ${action} not supported`);
         }
