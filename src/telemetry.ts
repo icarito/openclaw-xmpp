@@ -52,8 +52,10 @@ export interface AgentTelemetry {
   dayCost: number | null;
   model: string | null;
   tool: string | null;
-  activity: "available" | "busy" | "paused";
+  activity: "available" | "busy" | "paused" | "pending";
   availability: "available" | "busy" | "away";
+  /** Sólo con activity="pending": mensajes en cola sin procesar aún. */
+  pendingCount?: number;
   sessionStatus: string | null;
 }
 
@@ -84,12 +86,16 @@ function humanStatus(t: AgentTelemetry): string {
   if (t.tool) return `Usando herramienta: ${t.tool}`;
   if (t.activity === "busy") return "Trabajando";
   if (t.activity === "paused") return "Ausente";
+  if (t.activity === "pending") {
+    const n = t.pendingCount ?? 1;
+    return n === 1 ? "1 mensaje por procesar" : `${n} mensajes por procesar`;
+  }
   return "Disponible";
 }
 
 function directedShow(t: AgentTelemetry): Show | null {
   if (t.activity === "busy") return "dnd";
-  if (t.activity === "paused") return "away";
+  if (t.activity === "paused" || t.activity === "pending") return "away";
   return null;
 }
 
@@ -471,7 +477,12 @@ function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { sh
   // "Trabajando" hasta la siguiente sesión.
   const sessionBusy = sessionStatus !== null && SESSION_BUSY_STATUSES.has(sessionStatus);
   const busy = !paused && (toolState?.active === true || live?.activity === "busy" || sessionBusy);
-  const activity: AgentTelemetry["activity"] = paused ? "paused" : busy ? "busy" : "available";
+  // "pending" sólo se anuncia si nada más ya dice que el agente está ocupado:
+  // busy siempre gana, porque ya es más informativo (el remitente ya sabe que
+  // hay actividad) y setXmppAccountActivity limpia el registro de pending al
+  // pasar a busy, así que en condiciones normales nunca coexisten.
+  const pending = !paused && !busy && live?.activity === "pending";
+  const activity: AgentTelemetry["activity"] = paused ? "paused" : busy ? "busy" : pending ? "pending" : "available";
   const availability: AgentTelemetry["availability"] = paused ? "away" : busy ? "busy" : "available";
 
   const telemetry: AgentTelemetry = {
@@ -491,6 +502,7 @@ function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { sh
     activity,
     availability,
     sessionStatus,
+    pendingCount: pending ? live?.pendingCount : undefined,
   };
 
   // Mirrors NanoClaw's agentState(): <status/> is what clients (Gajim,

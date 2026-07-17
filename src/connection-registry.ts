@@ -44,3 +44,7 @@ export function unregisterActiveXmppConnection(accountId: string): void {
 export function getActiveXmppConnection(accountId: string): XmppConnection | undefined {
   return getRegistry().get(accountId);
 }
+
+export function listActiveXmppConnections(): Array<{ accountId: string; connection: XmppConnection }> {
+  return [...getRegistry()].map(([accountId, connection]) => ({ accountId, connection }));
+}

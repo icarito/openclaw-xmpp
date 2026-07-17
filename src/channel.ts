@@ -160,6 +160,17 @@ function isXmppInlineButtonsEnabled(params: { cfg: CoreConfig; accountId?: strin
   return resolveInlineButtonsScope(account.config.capabilities) !== "off";
 }
 
+const APPROVAL_CARD_TITLE_MAX = 80;
+
+/** Título de una sola línea para la card de aprobación: el comando en sí, no
+ * un genérico "OpenClaw" ni el bloque de texto verbose del fallback. */
+function buildApprovalCardTitle(commandText: string): string {
+  const oneLine = commandText.replace(/\s+/g, " ").trim();
+  if (!oneLine) return "Approval required";
+  if (oneLine.length <= APPROVAL_CARD_TITLE_MAX) return oneLine;
+  return `${oneLine.slice(0, APPROVAL_CARD_TITLE_MAX - 1)}…`;
+}
+
 function readFirstString(params: Record<string, unknown>, keys: string[]): string {
   for (const key of keys) {
     const value = params[key];
@@ -253,12 +264,13 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
       render: {
         exec: {
           buildPendingPayload: ({ request, nowMs }) => {
+            const commandText = resolveExecApprovalCommandDisplay(request.request).commandText;
             const payload = buildExecApprovalPendingReplyPayload({
               approvalId: request.id,
               approvalSlug: request.id.slice(0, 8),
               approvalCommandId: request.id,
               warningText: request.request.warningText ?? undefined,
-              command: resolveExecApprovalCommandDisplay(request.request).commandText,
+              command: commandText,
               cwd: request.request.cwd ?? undefined,
               host: request.request.host === "node" ? "node" : "gateway",
               nodeId: request.request.nodeId ?? undefined,
@@ -266,8 +278,21 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
               expiresAtMs: request.expiresAtMs,
               nowMs,
             });
-            return {
+            const result = {
               ...payload,
+              // buildExecApprovalPendingReplyPayload no pone presentation.title,
+              // así que send.ts caía al fallback fijo "OpenClaw" como primera
+              // línea de la card -- el comando quedaba enterrado en el fallback
+              // de texto verbose. Un título con el comando (una sola línea) es
+              // lo único que un cliente de sólo-texto llega a ver de un vistazo.
+              ...(payload.presentation
+                ? {
+                    presentation: {
+                      ...payload.presentation,
+                      title: buildApprovalCardTitle(commandText),
+                    },
+                  }
+                : {}),
               channelData: {
                 ...(payload.channelData ?? {}),
                 xmpp: {
@@ -278,6 +303,7 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
                 },
               },
             };
+            return result;
           },
         },
         plugin: {

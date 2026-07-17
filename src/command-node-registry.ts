@@ -31,6 +31,10 @@ function responseKey(accountId: string, jid: string, responseText: string): stri
   return `${accountId}\0${jid}\0${responseText.trim().toLowerCase()}`;
 }
 
+function accountPrefix(accountId: string): string {
+  return `${accountId}\0`;
+}
+
 export function registerXmppCommandNode(params: {
   accountId: string;
   node: string;
@@ -80,4 +84,13 @@ export function consumeXmppCommandResponse(
   registry.delete(registryKey);
   if (entry.expiresAt <= Date.now()) return undefined;
   return entry;
+}
+
+export function clearXmppCommandNodes(accountId: string): void {
+  const prefix = accountPrefix(accountId);
+  for (const registry of [getRegistry(), getResponseRegistry()]) {
+    for (const registryKey of registry.keys()) {
+      if (registryKey.startsWith(prefix)) registry.delete(registryKey);
+    }
+  }
 }

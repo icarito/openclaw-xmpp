@@ -38,8 +38,9 @@ import { buildNativeCommandActions, dispatchNativeCommandText } from "./native-c
 import { Xep0050Handler } from "./xep-0050.js";
 import { TextualFallback } from "./textual-fallback.js";
 import { buildCorrectionStanza, buildQueryCommandStanza, buildQuickResponseStanza, resolveInlineButtonsScope } from "./outbound-render.js";
-import { consumeXmppCommandNode, consumeXmppCommandResponse, registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
+import { clearXmppCommandNodes, consumeXmppCommandNode, consumeXmppCommandResponse, registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
 import { normalizeXmppOptions, matchOptionReply, shortQuestionId } from "./ask-question.js";
+import { clearXmppAccountActivity } from "./activity-registry.js";
 import { getActiveXmppConnection } from "./connection-registry.js";
 import { isGroupJid } from "./normalize.js";
 import { nextStanzaId } from "./protocol.js";
@@ -65,7 +66,16 @@ export interface XmppCommandRuntime {
   }) => Element;
   /** Resolve a pending question by its q:* command node, if any (called from client.ts's handleIq before dispatch). */
   tryResolveQuestionNode: (node: string) => { questionId: string; value: string } | undefined;
+  clearPending: () => void;
   cleanup: () => void;
+}
+
+function isResetOrClearCommandText(text: string): boolean {
+  return /^\/(?:clear|reset|new)(?:\s|$)/i.test(text.trim());
+}
+
+function isResetOrClearActionNode(node: string): boolean {
+  return node === "clear" || node === "reset" || node === "new";
 }
 
 function buildAccountActions(params: {
@@ -115,7 +125,21 @@ export function registerXmppCommands(params: {
 }): XmppCommandRuntime {
   const { account, cfg, runtime, sendPlain, log } = params;
 
-  const dispatcher = createActionDispatcher(buildAccountActions({ account, cfg, runtime }));
+  let clearPending = () => {
+    clearXmppCommandNodes(account.accountId);
+    clearXmppAccountActivity(account.accountId);
+  };
+  const actions = buildAccountActions({ account, cfg, runtime }).map((action) => {
+    if (!isResetOrClearActionNode(action.node)) return action;
+    return {
+      ...action,
+      handler: (formParams, ctx) => {
+        clearPending();
+        return action.handler(formParams, ctx);
+      },
+    } satisfies XmppAction;
+  });
+  const dispatcher = createActionDispatcher(actions);
 
   const xep0050 = new Xep0050Handler({
     dispatcher,
@@ -128,6 +152,14 @@ export function registerXmppCommands(params: {
   // value} for q:* command nodes, mirroring xmpp.ts's pendingQuestions /
   // pendingQuestionNodes maps. Scoped to this connection's lifetime.
   const pendingQuestionNodes = new Map<string, { questionId: string; value: string }>();
+
+  clearPending = () => {
+    pendingQuestionNodes.clear();
+    clearXmppCommandNodes(account.accountId);
+    clearXmppAccountActivity(account.accountId);
+    xep0050.clearPending();
+    textual.clearPending();
+  };
 
   const handleIq = async (stanza: Element): Promise<Element | undefined> => {
     // Intercept q:* question nodes before the dispatcher, same as xmpp.ts's
@@ -162,6 +194,7 @@ export function registerXmppCommands(params: {
       const id = (stanza.attrs.id as string) || "";
       const entry = consumeXmppCommandNode(account.accountId, cmdNode);
       if (entry) {
+        if (isResetOrClearCommandText(entry.commandText)) clearPending();
         dispatchNativeCommandText({
           commandText: entry.commandText,
           fromJid: from,
@@ -239,8 +272,11 @@ export function registerXmppCommands(params: {
   };
 
   const handleMessage = (jid: string, body: string, _stanza?: Element): boolean => {
+    if (isResetOrClearCommandText(body)) clearPending();
+
     const responseEntry = consumeXmppCommandResponse(account.accountId, jid, body);
     if (responseEntry) {
+      if (isResetOrClearCommandText(responseEntry.commandText)) clearPending();
       dispatchNativeCommandText({
         commandText: responseEntry.commandText,
         fromJid: jid,
@@ -309,6 +345,7 @@ export function registerXmppCommands(params: {
     hasPending,
     renderQuestion,
     tryResolveQuestionNode,
+    clearPending,
     cleanup: () => {
       xep0050.cleanup();
       textual.cleanup();

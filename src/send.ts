@@ -26,7 +26,12 @@ import { getActiveXmppConnection } from "./connection-registry.js";
 import { uploadFileXmpp } from "./upload.js";
 import { buildQuickResponseStanza, resolveInlineButtonsScope, type XmppInlineButtonsScope } from "./outbound-render.js";
 import { registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
-import { registerActivityExpiryHandler, setXmppAccountActivity } from "./activity-registry.js";
+import {
+  getXmppAccountActivity,
+  markXmppMessagePending,
+  registerActivityExpiryHandler,
+  setXmppAccountActivity,
+} from "./activity-registry.js";
 import type { CoreConfig } from "./types.js";
 
 type SendXmppOptions = {
@@ -228,16 +233,61 @@ function capsVerHash(): string {
   return crypto.createHash("sha1").update(identityStr + featuresStr, "utf8").digest("base64");
 }
 
-function buildStatusPresence(to: string, activity: "available" | "processing" | "paused"): ReturnType<typeof xml> {
-  const show = activity === "processing" ? "dnd" : activity === "paused" ? "away" : undefined;
-  const status = activity === "processing" ? "Trabajando" : activity === "paused" ? "Ausente" : "Disponible";
+function buildStatusPresence(
+  to: string,
+  activity: "available" | "processing" | "paused" | "pending",
+  statusText?: string,
+): ReturnType<typeof xml> {
+  // "pending" usa el mismo <show>away</show> que "paused": XMPP no tiene un
+  // quinto valor entre disponible y ocupado, así que un cliente que sólo mira
+  // el color ya ve "ausente" -- el texto en <status> (el contador) es lo que
+  // distingue "llegó un mensaje" de "está pausado a propósito".
+  const show = activity === "processing" ? "dnd" : (activity === "paused" || activity === "pending") ? "away" : undefined;
+  const defaultStatus = activity === "processing" ? "Trabajando"
+    : activity === "paused" ? "Ausente"
+    : activity === "pending" ? "Mensaje recibido"
+    : "Disponible";
   return xml(
     "presence",
     { to },
     ...(show ? [xml("show", {}, show)] : []),
-    xml("status", {}, status),
+    xml("status", {}, statusText ?? defaultStatus),
     xml("c", { xmlns: "http://jabber.org/protocol/caps", hash: "sha-1", node: CAPS_NODE, ver: capsVerHash() }),
   );
+}
+
+/**
+ * Publica de inmediato que un mensaje entró y está en cola, sin esperar al
+ * siguiente tick del loop de telemetría (10s). El registro en memoria
+ * (activity-registry) es lo que decide si el agente ya estaba "busy" -- en
+ * ese caso este emisor no debe pisar el dnd real con un away de cola.
+ */
+export async function sendPendingStatusXmpp(
+  to: string,
+  pendingCount: number,
+  opts: SendXmppOptions,
+): Promise<void> {
+  const cfg = requireRuntimeConfig(opts.cfg, "XMPP pending status") as CoreConfig;
+  const account = resolveXmppAccount({ cfg, accountId: opts.accountId });
+  if (!account.configured) return;
+  let target: string;
+  try {
+    target = resolveTarget(to, opts);
+  } catch {
+    return;
+  }
+  const connection = getActiveXmppConnection(account.accountId);
+  if (!connection?.isConnected()) return;
+  const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
+  if (getXmppAccountActivity(account.accountId)?.activity === "busy") return;
+  markXmppMessagePending(account.accountId, target);
+  if (type !== "chat") return; // sólo tiene sentido presencia directa 1:1
+  const label = pendingCount === 1 ? "1 mensaje por procesar" : `${pendingCount} mensajes por procesar`;
+  try {
+    await connection.send(buildStatusPresence(target, "pending", label));
+  } catch {
+    // best-effort
+  }
 }
 
 /**

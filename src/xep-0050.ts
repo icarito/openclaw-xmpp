@@ -78,6 +78,10 @@ export class Xep0050Handler {
     return `${from}::${id}`;
   }
 
+  clearPending(): void {
+    this.pending.clear();
+  }
+
   async handleIq(iq: Element): Promise<Element | null> {
     const type = iq.attrs.type as string;
     if (type !== "get" && type !== "set") return null;

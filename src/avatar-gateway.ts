@@ -6,7 +6,7 @@
 // se llenó el chat de approval requests en la primera prueba). Un método del
 // gateway le da la capacidad como una llamada de una sola línea, sin shell y
 // sin aprobaciones.
-import { getActiveXmppConnection } from "./connection-registry.js";
+import { getActiveXmppConnection, listActiveXmppConnections } from "./connection-registry.js";
 import { publishAvatar } from "./avatar.js";
 
 export const XMPP_SET_AVATAR_METHOD = "xmpp.avatar.set";
@@ -15,7 +15,7 @@ type RegisterGatewayMethod = (
   method: string,
   handler: (opts: {
     params: Record<string, unknown>;
-    respond: (ok: boolean, payload?: unknown) => void;
+    respond: (ok: boolean, payload?: unknown, error?: { code: string; message: string }) => void;
   }) => Promise<void> | void,
   opts?: { scope?: never },
 ) => void;
@@ -28,6 +28,33 @@ function readString(params: Record<string, unknown>, ...keys: string[]): string 
   return null;
 }
 
+function gatewayError(code: "INVALID_REQUEST" | "UNAVAILABLE", message: string): { code: string; message: string } {
+  return { code, message };
+}
+
+function inferAccountIdFromSource(source: string): string | null {
+  const normalized = source.replace(/\\/g, "/");
+  const match = normalized.match(/\/workspaces\/([^/]+)(?:\/|$)/);
+  if (!match) return null;
+  const workspace = match[1];
+  return workspace === "main" ? "clawdio" : workspace;
+}
+
+function resolveAvatarConnection(requestedAccountId: string | null) {
+  if (requestedAccountId) {
+    const connection = getActiveXmppConnection(requestedAccountId);
+    return connection ? { accountId: requestedAccountId, connection } : null;
+  }
+
+  const defaultConnection = getActiveXmppConnection("default");
+  if (defaultConnection) return { accountId: "default", connection: defaultConnection };
+
+  const active = listActiveXmppConnections().filter((entry) => entry.connection.isConnected());
+  const clawdio = active.find((entry) => entry.accountId === "clawdio");
+  if (clawdio) return clawdio;
+  return active.length === 1 ? active[0] : null;
+}
+
 export function registerXmppAvatarGatewayMethods(api: {
   registerGatewayMethod: RegisterGatewayMethod;
 }): void {
@@ -35,25 +62,28 @@ export function registerXmppAvatarGatewayMethods(api: {
     try {
       const source = readString(params, "source", "path", "url", "image");
       if (!source) {
-        respond(false, {
-          error: "Falta 'source': la ruta local o la URL de la imagen del avatar",
-        });
+        respond(
+          false,
+          undefined,
+          gatewayError("INVALID_REQUEST", "Falta 'source': la ruta local o la URL de la imagen del avatar"),
+        );
         return;
       }
-      // Sin accountId asumimos la cuenta por defecto, que es el caso normal:
-      // un agente tiene una sola cuenta XMPP.
-      const accountId = readString(params, "accountId", "account") ?? "default";
-      const connection = getActiveXmppConnection(accountId);
-      if (!connection) {
-        respond(false, {
-          error: `La cuenta XMPP "${accountId}" no tiene una conexión activa`,
-        });
+      const requestedAccountId = readString(params, "accountId", "account") ?? inferAccountIdFromSource(source);
+      const resolved = resolveAvatarConnection(requestedAccountId);
+      if (!resolved) {
+        const active = listActiveXmppConnections().map((entry) => entry.accountId).join(", ") || "ninguna";
+        const hint = requestedAccountId
+          ? `La cuenta XMPP "${requestedAccountId}" no tiene una conexión activa`
+          : `No se pudo elegir una cuenta XMPP activa para publicar el avatar (activas: ${active}); pasa accountId`;
+        respond(false, undefined, gatewayError("UNAVAILABLE", hint));
         return;
       }
 
-      const result = await publishAvatar({ accountId, connection, source });
+      const result = await publishAvatar({ accountId: resolved.accountId, connection: resolved.connection, source });
       respond(true, {
         ok: true,
+        accountId: resolved.accountId,
         hash: result.hash,
         bytes: result.bytes,
         mimeType: result.mimeType,
@@ -62,7 +92,7 @@ export function registerXmppAvatarGatewayMethods(api: {
         note: "Avatar publicado (XEP-0084 + XEP-0153). Los clientes lo verán en unos segundos.",
       });
     } catch (error) {
-      respond(false, { error: error instanceof Error ? error.message : String(error) });
+      respond(false, undefined, gatewayError("UNAVAILABLE", error instanceof Error ? error.message : String(error)));
     }
   });
 }

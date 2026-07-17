@@ -36,11 +36,17 @@ import type { ResolvedXmppAccount } from "./accounts.js";
 import { bareJid, buildXmppAllowlistCandidates, normalizeXmppAllowEntry } from "./normalize.js";
 import { resolveXmppGroupMatch, resolveXmppGroupRequireMention } from "./policy.js";
 import { getXmppRuntime } from "./runtime.js";
-import { sendMessageXmpp, sendPayloadXmpp } from "./send.js";
+import { sendMessageXmpp, sendPayloadXmpp, sendPendingStatusXmpp } from "./send.js";
+import { getXmppAccountActivity } from "./activity-registry.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
 
 const CHANNEL_ID = "xmpp" as const;
 type XmppGroupPolicy = "open" | "allowlist" | "disabled";
+type XmppReplyOptions = {
+  streamingBehavior: "steer";
+  skillFilter?: string[];
+  disableBlockStreaming?: boolean;
+};
 
 const xmppIngressIdentity = defineStableChannelIngressIdentity({
   key: "xmpp-jid",
@@ -433,6 +439,19 @@ export async function handleXmppInbound(params: {
     CommandAuthorized: commandAuthorized,
   });
 
+  // El mensaje ya pasó todas las validaciones y va a entrar al agente: si no
+  // hay un turno en curso (busy real), anunciamos "away" con el contador antes
+  // de que dispatchReply arranque el turno de verdad. sendTypingXmpp (vía el
+  // heartbeat del core) lo sube a dnd apenas el turno empieza; esto sólo cubre
+  // el hueco entre "llegó" y "arrancó", que hasta ahora era invisible para
+  // cualquier cliente XMPP -- Android lo aproximaba contando mensajes propios
+  // sin respuesta, pero eso no es una presencia real ni lo ven otros clientes.
+  const pendingCount = getXmppAccountActivity(account.accountId)?.pendingCount ?? 0;
+  await sendPendingStatusXmpp(peerId, pendingCount + 1, {
+    cfg: config,
+    accountId: account.accountId,
+  }).catch(() => {});
+
   await core.channel.inbound.dispatchReply({
     cfg: config as OpenClawConfig,
     channel: CHANNEL_ID,
@@ -460,10 +479,14 @@ export async function handleXmppInbound(params: {
     },
     replyPipeline: {},
     replyOptions: {
+      // XMPP is conversational: when a human talks while the agent is already
+      // working, treat the new message as steering for the active turn instead
+      // of silently stacking a follow-up behind it.
+      streamingBehavior: "steer",
       skillFilter: groupMatch.groupConfig?.skills,
       disableBlockStreaming:
         typeof blockStreamingEnabled === "boolean" ? !blockStreamingEnabled : undefined,
-    },
+    } as XmppReplyOptions,
     record: {
       onRecordError: (err) => {
         runtime.error?.(`xmpp: failed updating session meta: ${String(err)}`);

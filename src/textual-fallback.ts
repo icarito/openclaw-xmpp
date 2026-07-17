@@ -246,6 +246,10 @@ export class TextualFallback {
     this.pending.delete(this.commandKey(jid));
   }
 
+  clearPending(): void {
+    this.pending.clear();
+  }
+
   cleanup(_maxAgeMs: number = 300_000): void {
     // Textual sessions don't embed timestamps; a no-op until timestamps are
     // added. Sessions auto-cleanup on completion or explicit cancel.

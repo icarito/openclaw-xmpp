@@ -11,7 +11,7 @@ import type { Element } from "@xmpp/xml";
 
 const DISCO_ITEMS_NS = "http://jabber.org/protocol/disco#items";
 const COMMAND_NS = "http://jabber.org/protocol/commands";
-const QR_NS = "urn:xmpp:quick-response:0";
+const QR_NS = "urn:xmpp:tmp:quick-response";
 
 export type XmppInlineButtonsScope = "off" | "dm" | "group" | "all" | "allowlist";
 
@@ -84,6 +84,7 @@ export function buildQuickResponseStanza(
   const bodyText = cleanBody.toLowerCase().startsWith(cleanTitle.toLowerCase())
     ? cleanBody
     : `${cleanTitle}${cleanBody ? `\n\n${cleanBody}` : ""}`;
+  const hasCommandItems = (metadata?.commandItems?.length ?? 0) > 0;
   const quickResponseReference = xml(
     "reference",
     { xmlns: QR_NS, type: "action" },
@@ -118,7 +119,8 @@ export function buildQuickResponseStanza(
   const query = queryItems.length > 0
     ? [xml("query", { xmlns: DISCO_ITEMS_NS, node: COMMAND_NS }, ...queryItems)]
     : [];
-  return xml("message", { type, to, id }, xml("body", {}, bodyText), quickResponseReference, ...quickResponses, ...query);
+  const quickResponsePayload = hasCommandItems ? [] : [quickResponseReference, ...quickResponses];
+  return xml("message", { type, to, id }, xml("body", {}, bodyText), ...quickResponsePayload, ...query);
 }
 
 /**
