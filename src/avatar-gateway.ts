@@ -34,7 +34,7 @@ function gatewayError(code: "INVALID_REQUEST" | "UNAVAILABLE", message: string):
 
 function inferAccountIdFromSource(source: string): string | null {
   const normalized = source.replace(/\\/g, "/");
-  const match = normalized.match(/\/workspaces\/([^/]+)(?:\/|$)/);
+  const match = normalized.match(/\/(?:workspaces|agents)\/([^/]+)(?:\/|$)/);
   if (!match) return null;
   const workspace = match[1];
   return workspace === "main" ? "clawdio" : workspace;

@@ -24,8 +24,9 @@
 //     but wiring it fully requires passing skillCommands into
 //     inbound.ts's hasControlCommand/shouldHandleTextCommands call sites,
 //     which is deeper surgery than this pass covers -- see PORT-NOTES.md.
-//   - approval-bypass -- NOT ported. NanoClaw-specific (modules/approvals/bypass.ts),
-//     no OpenClaw equivalent.
+//   - approval-mode / approval-bypass -- LIVE. Host-side commands that edit
+//     tools.exec policy without waking an agent, so routine policy changes do
+//     not themselves create approval loops.
 // What IS live: the XEP-0050/XEP-0004 protocol machinery itself (xep-0050.ts,
 // xep-0004.ts), the textual /oc fallback, and now the four native session
 // commands via native-commands.ts.
@@ -33,6 +34,7 @@ import type { Element } from "@xmpp/xml";
 import { xml } from "@xmpp/client";
 import { buildModelsProviderData } from "openclaw/plugin-sdk/models-provider-runtime";
 import type { ResolvedXmppAccount } from "./accounts.js";
+import { buildApprovalModeAction } from "./approval-mode.js";
 import { createActionDispatcher, type XmppAction } from "./actions.js";
 import { buildNativeCommandActions, dispatchNativeCommandText } from "./native-commands.js";
 import { Xep0050Handler } from "./xep-0050.js";
@@ -108,6 +110,15 @@ function buildAccountActions(params: {
     // into OpenClaw's real native command registry, the same one Telegram
     // uses for its slash commands.
     ...buildNativeCommandActions({ account, cfg, runtime }),
+    buildApprovalModeAction({ account, cfg }),
+    buildApprovalModeAction({
+      account,
+      cfg,
+      node: "approval-bypass",
+      name: "Approvals: bypass / whitelist",
+      description:
+        "Compatible command for clients: on=auto allowlist+flash reviewer, off=ask, full=broad bypass, deny=block exec.",
+    }),
   ];
 }
 

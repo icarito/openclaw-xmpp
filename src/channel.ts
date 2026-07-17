@@ -219,7 +219,7 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
       {
         name: XMPP_SET_AVATAR_METHOD,
         description:
-          "Publica el avatar de la cuenta XMPP (XEP-0084 + XEP-0153). params: { source: ruta local o URL de una imagen PNG/JPEG/GIF/WebP }",
+          "Publica el avatar de una cuenta XMPP (XEP-0084 + XEP-0153). params: { source: ruta local o URL de una imagen PNG/JPEG/GIF/WebP, accountId?: clawdio|bob|odiseo|... }. Si source esta bajo /agents/<id> o /workspaces/<id>, accountId se infiere.",
       },
     ],
     reload: { configPrefixes: ["channels.xmpp"] },

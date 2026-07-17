@@ -453,7 +453,7 @@ export async function sendPayloadXmpp(
 
   if (controls.length === 0) {
     logXmppSend("payload fell back to plain text");
-    return await sendMessageXmpp(to, text || payload.text || "", opts);
+    return await sendMessageXmpp(to, compactApprovalFallbackText(fallback), opts);
   }
 
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
