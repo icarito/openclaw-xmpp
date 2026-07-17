@@ -1,5 +1,6 @@
 // Xmpp plugin module implements channel behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
+import { XMPP_SET_AVATAR_METHOD } from "./avatar-gateway.js";
 import { formatNormalizedAllowFromEntries } from "openclaw/plugin-sdk/allow-from";
 import {
   buildExecApprovalPendingReplyPayload,
@@ -176,6 +177,15 @@ function readObjectParam(params: Record<string, unknown>, key: string): Record<s
     : undefined;
 }
 
+function mediaLoaderOptions(params: Record<string, unknown>) {
+  return {
+    ...(typeof params.maxBytes === "number" ? { maxBytes: params.maxBytes } : {}),
+    ...(params.mediaAccess !== undefined ? { mediaAccess: params.mediaAccess } : {}),
+    ...(params.mediaLocalRoots !== undefined ? { mediaLocalRoots: params.mediaLocalRoots } : {}),
+    ...(params.mediaReadFile !== undefined ? { mediaReadFile: params.mediaReadFile } : {}),
+  };
+}
+
 export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createChatChannelPlugin({
   base: {
     id: "xmpp",
@@ -191,6 +201,16 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
       blockStreaming: true,
       nativeCommands: true,
     },
+    // Declarados para que el gateway los enrute; los implementa
+    // registerXmppAvatarGatewayMethods() desde el registerFull del entry.
+    gatewayMethods: [XMPP_SET_AVATAR_METHOD],
+    gatewayMethodDescriptors: [
+      {
+        name: XMPP_SET_AVATAR_METHOD,
+        description:
+          "Publica el avatar de la cuenta XMPP (XEP-0084 + XEP-0153). params: { source: ruta local o URL de una imagen PNG/JPEG/GIF/WebP }",
+      },
+    ],
     reload: { configPrefixes: ["channels.xmpp"] },
     configSchema: XmppChannelConfigSchema,
     agentPrompt: {
@@ -312,9 +332,10 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
         capabilities: ["presentation"],
       }),
       supportsAction: ({ action }) => action === "send",
+      resolveExecutionMode: ({ action }) => (action === "send" ? "gateway" : "local"),
       isToolDeliveryAction: ({ args }) =>
         Boolean(readFirstString(args, ["target", "to", "channelId", "chatId"])),
-      handleAction: async ({ action, params, cfg, accountId }) => {
+      handleAction: async ({ action, params, cfg, accountId, mediaAccess, mediaLocalRoots, mediaReadFile }) => {
         if (action !== "send") {
           throw new Error(`XMPP action ${action} not supported`);
         }
@@ -348,6 +369,9 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
               ? await runtime.sendFileXmpp(target, message, mediaUrl, {
                   cfg: cfg as CoreConfig,
                   accountId: accountId ?? undefined,
+                  ...(mediaAccess !== undefined ? { mediaAccess } : {}),
+                  ...(mediaLocalRoots !== undefined ? { mediaLocalRoots } : {}),
+                  ...(mediaReadFile !== undefined ? { mediaReadFile } : {}),
                 })
               : await runtime.sendMessageXmpp(target, message, {
                   cfg: cfg as CoreConfig,
@@ -484,7 +508,8 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
           replyTo: replyToId ?? undefined,
         });
       },
-      sendMedia: async ({ cfg, to, text, mediaUrl, accountId, replyToId }) => {
+      sendMedia: async (params) => {
+        const { cfg, to, text, mediaUrl, accountId, replyToId } = params;
         if (!mediaUrl) {
           const { sendMessageXmpp } = await loadXmppChannelRuntime();
           return await sendMessageXmpp(to, text, {
@@ -498,6 +523,7 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
           cfg: cfg as CoreConfig,
           accountId: accountId ?? undefined,
           replyTo: replyToId ?? undefined,
+          ...mediaLoaderOptions(params as Record<string, unknown>),
         });
       },
     },

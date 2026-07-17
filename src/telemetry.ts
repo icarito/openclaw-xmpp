@@ -35,6 +35,7 @@ import { normalizeXmppMessagingTarget } from "./normalize.js";
 import type { CoreConfig } from "./types.js";
 import { CAPS_FEATURES, CAPS_IDENTITY, CAPS_NODE } from "./xep-0050.js";
 import { getXmppAccountActivity } from "./activity-registry.js";
+import { buildVCardUpdateElement, getPublishedAvatarHash } from "./avatar.js";
 
 /** PEP node carrying agent telemetry. */
 const TELEMETRY_NODE = "urn:openclaw:telemetry:0";
@@ -64,14 +65,18 @@ function capsVerHash(): string {
   return crypto.createHash("sha1").update(identityStr + featuresStr, "utf8").digest("base64");
 }
 
-function buildCapsPresence(show?: Show, status?: string): Element {
+function buildCapsPresence(accountId: string, show?: Show, status?: string): Element {
   const ver = capsVerHash();
+  // XEP-0153: el hash del avatar viaja en CADA presencia; es así como los
+  // clientes se enteran de que hay uno nuevo que pedir.
+  const vcardUpdate = buildVCardUpdateElement(accountId);
   return xml(
     "presence",
     {},
     ...(show ? [xml("show", {}, show)] : []),
     ...(status ? [xml("status", {}, status)] : []),
     xml("c", { xmlns: "http://jabber.org/protocol/caps", hash: "sha-1", node: CAPS_NODE, ver }),
+    ...(vcardUpdate ? [vcardUpdate] : []),
   );
 }
 
@@ -88,15 +93,17 @@ function directedShow(t: AgentTelemetry): Show | null {
   return null;
 }
 
-function buildDirectedStatusPresence(to: string, t: AgentTelemetry): Element {
+function buildDirectedStatusPresence(accountId: string, to: string, t: AgentTelemetry): Element {
   const ver = capsVerHash();
   const show = directedShow(t);
+  const vcardUpdate = buildVCardUpdateElement(accountId);
   return xml(
     "presence",
     { to },
     ...(show ? [xml("show", {}, show)] : []),
     xml("status", {}, humanStatus(t)),
     xml("c", { xmlns: "http://jabber.org/protocol/caps", hash: "sha-1", node: CAPS_NODE, ver }),
+    ...(vcardUpdate ? [vcardUpdate] : []),
   );
 }
 
@@ -202,6 +209,15 @@ function resolveAgentIdForAccount(cfg: CoreConfig, account: ResolvedXmppAccount)
 function readJsonFile(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf8"));
 }
+
+/**
+ * Estados de sesión que significan "hay un turno corriendo". Es deliberadamente
+ * una lista de lo OCUPADO y no de lo libre: un estado desconocido (o terminal,
+ * como "failed") debe leerse como disponible, nunca dejar al agente clavado en
+ * dnd. Los estados en curso reales se detectan además por toolState.active y
+ * por la actividad viva del registro, así que esta lista es sólo un refuerzo.
+ */
+const SESSION_BUSY_STATUSES = new Set(["running", "active", "busy", "working", "in_progress", "streaming"]);
 
 function readSessionStatus(sessionsDir: string, sessionFile: string): string | null {
   const path = join(sessionsDir, "sessions.json");
@@ -394,7 +410,14 @@ function readCurrentTool(entries: ReturnType<typeof loadEntriesFromFile>): { nam
         }
         continue;
       }
-      return typeof item.name === "string" ? { name: item.name, active: true } : null;
+      // toolCall sin toolResult: en marcha sólo si acaba de ocurrir. Si la
+      // sesión murió a mitad de la llamada (proceso caído, turno abortado) el
+      // resultado no va a llegar nunca, y darlo por vivo dejaba al agente en
+      // dnd "usando exec" indefinidamente -- así se quedó Rolando ~1h.
+      if (typeof item.name !== "string") return null;
+      const startedAt = entryTimestampMs(entry);
+      const stale = startedAt === null || now - startedAt > RECENT_TOOL_TTL_MS;
+      return { name: item.name, active: !stale };
     }
     // Reached an assistant turn whose tool calls are all resolved (or it had
     // none) -- nothing is in flight, no need to keep scanning further back.
@@ -431,13 +454,23 @@ function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { sh
   const contextUsed = activeContextTokens(usage);
   const contextMax = (model && CONTEXT_MAX_BY_MODEL[model]) || DEFAULT_CONTEXT_MAX;
   const toolState = readCurrentTool(entries);
-  const tool = toolState?.name ?? null;
+  // Sólo anunciamos la herramienta mientras de verdad está corriendo: el nombre
+  // sobrevive a la llamada (readCurrentTool lo devuelve con active:false cuando
+  // ya terminó o quedó huérfana), y humanStatus() lo usa sin mirar el flag, así
+  // que el agente seguía diciendo "Usando herramienta: exec" ya estando libre.
+  const tool = toolState?.active === true ? toolState.name : null;
   const sessionTotals = sumUsage(entries);
   const dayTotals = readDayUsage(sessionsDir);
   const sessionStatus = readSessionStatus(sessionsDir, sessionFile);
   const live = getXmppAccountActivity(account.accountId);
   const paused = sessionStatus === "paused" || sessionStatus === "suspended";
-  const busy = !paused && (toolState?.active === true || live?.activity === "busy" || (sessionStatus !== null && !["done", "idle", "completed"].includes(sessionStatus)));
+  // Sólo los estados que significan trabajo en curso cuentan como ocupado.
+  // Antes esto era una lista blanca de estados "libres" ("done"/"idle"/
+  // "completed") y CUALQUIER otro valor -- incluido "failed" -- dejaba al
+  // agente en dnd para siempre: una sesión que reventó se anunciaba como
+  // "Trabajando" hasta la siguiente sesión.
+  const sessionBusy = sessionStatus !== null && SESSION_BUSY_STATUSES.has(sessionStatus);
+  const busy = !paused && (toolState?.active === true || live?.activity === "busy" || sessionBusy);
   const activity: AgentTelemetry["activity"] = paused ? "paused" : busy ? "busy" : "available";
   const availability: AgentTelemetry["availability"] = paused ? "away" : busy ? "busy" : "available";
 
@@ -486,7 +519,7 @@ export function startTelemetryLoop(params: {
   logger?: { info: (m: string) => void; warn?: (m: string) => void; debug?: (m: string) => void };
 }): TelemetryLoopHandle {
   const { account, cfg, connection, logger } = params;
-  let lastPresence: { show: Show; status: string } | null = null;
+  let lastPresence: { show: Show; status: string; avatarHash: string | null } | null = null;
   let lastTelemetry: AgentTelemetry | null = null;
   let lastDirectedActivity: string | null = null;
   let loggedInert = false;
@@ -500,11 +533,19 @@ export function startTelemetryLoop(params: {
       loggedInert = true;
     }
 
-    if (force || lastPresence?.show !== state.show || lastPresence.status !== state.status) {
-      await connection.send(buildCapsPresence(state.show, state.status)).catch((err) =>
+    // El avatar entra en la comparación: al publicar uno nuevo hay que reemitir
+    // la presencia con su hash (XEP-0153) o nadie se entera del cambio.
+    const avatarHash = getPublishedAvatarHash(account.accountId);
+    if (
+      force ||
+      lastPresence?.show !== state.show ||
+      lastPresence.status !== state.status ||
+      lastPresence.avatarHash !== avatarHash
+    ) {
+      await connection.send(buildCapsPresence(account.accountId, state.show, state.status)).catch((err) =>
         logger?.warn?.(`XMPP presence publish failed: ${String(err)}`),
       );
-      lastPresence = { show: state.show, status: state.status };
+      lastPresence = { show: state.show, status: state.status, avatarHash };
     }
 
     if (state.telemetry && (force || telemetryChanged(lastTelemetry, state.telemetry))) {
@@ -523,7 +564,7 @@ export function startTelemetryLoop(params: {
     if (force || directedActivity !== lastDirectedActivity) {
       const target = resolveDirectedStatusTarget(account);
       if (target && state.telemetry) {
-        await connection.send(buildDirectedStatusPresence(target, state.telemetry)).catch((err) =>
+        await connection.send(buildDirectedStatusPresence(account.accountId, target, state.telemetry)).catch((err) =>
           logger?.warn?.(`XMPP directed status publish failed: ${String(err)}`),
         );
       }

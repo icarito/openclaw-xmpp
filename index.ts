@@ -1,11 +1,18 @@
 // Xmpp plugin entrypoint registers its OpenClaw integration.
 import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
+import { registerXmppAvatarGatewayMethods, XMPP_SET_AVATAR_METHOD } from "./src/avatar-gateway.js";
 
 export default defineBundledChannelEntry({
   id: "xmpp",
   name: "XMPP",
   description: "XMPP/Jabber channel plugin",
   importMetaUrl: import.meta.url,
+  // El agente no puede tocar su propia conexión XMPP: sin un método del
+  // gateway, "ponte este avatar" acaba en `exec` y en una cascada de
+  // aprobaciones.
+  registerFull: (api) => {
+    registerXmppAvatarGatewayMethods(api);
+  },
   plugin: {
     specifier: "./channel-plugin-api.js",
     exportName: "xmppPlugin",

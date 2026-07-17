@@ -26,7 +26,7 @@ import { getActiveXmppConnection } from "./connection-registry.js";
 import { uploadFileXmpp } from "./upload.js";
 import { buildQuickResponseStanza, resolveInlineButtonsScope, type XmppInlineButtonsScope } from "./outbound-render.js";
 import { registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
-import { setXmppAccountActivity } from "./activity-registry.js";
+import { registerActivityExpiryHandler, setXmppAccountActivity } from "./activity-registry.js";
 import type { CoreConfig } from "./types.js";
 
 type SendXmppOptions = {
@@ -193,10 +193,21 @@ function recordXmppOutboundActivity(accountId: string): void {
 
 function logXmppSend(message: string): void {
   try {
-    getXmppRuntime().log?.(`[xmpp] ${message}`);
+    (getXmppRuntime() as { log?: (message: string) => void }).log?.(`[xmpp] ${message}`);
   } catch {
     // Runtime may not be initialized in isolated tests.
   }
+}
+
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as { cause?: unknown }).cause;
+  const causeText = cause instanceof Error
+    ? `; cause=${cause.name}: ${cause.message}`
+    : cause !== undefined
+      ? `; cause=${String(cause)}`
+      : "";
+  return `${error.name}: ${error.message}${causeText}`;
 }
 
 function resolveTarget(to: string, opts?: SendXmppOptions): string {
@@ -293,17 +304,25 @@ export async function sendMessageXmpp(
   let firstId: string | undefined;
   if (connection?.isConnected()) {
     const chunks = splitForLimit(plain, XMPP_MAX_BODY);
-    for (let i = 0; i < chunks.length; i++) {
-      const id = nextStanzaId();
-      if (i === 0) firstId = id;
-      await connection.send(xml("message", { type, to: target, id }, xml("body", {}, chunks[i]!)));
-    }
     try {
-      await connection.send(
-        xml("message", { type, to: target }, xml("active", { xmlns: "http://jabber.org/protocol/chatstates" })),
-      );
-    } catch {
-      // best-effort
+      for (let i = 0; i < chunks.length; i++) {
+        const id = nextStanzaId();
+        if (i === 0) firstId = id;
+        await connection.send(xml("message", { type, to: target, id }, xml("body", {}, chunks[i]!)));
+      }
+    } finally {
+      // Pase lo que pase con el cuerpo, el agente deja de estar ocupado: si
+      // salimos por excepción sin soltar el dnd, el contacto queda "ocupado"
+      // hasta el próximo turno (o para siempre si el proceso muere).
+      setXmppAccountActivity(account.accountId, "available", target);
+      try {
+        await connection.send(
+          xml("message", { type, to: target }, xml("active", { xmlns: "http://jabber.org/protocol/chatstates" })),
+        );
+        if (type === "chat") await connection.send(buildStatusPresence(target, "available"));
+      } catch {
+        // best-effort
+      }
     }
   } else {
     throw new Error(
@@ -486,18 +505,46 @@ export async function sendFileXmpp(
   const caption = markdownToPlain(text.trim());
   const domain = account.jid.split("@")[1]!;
 
-  const media = await loadOutboundMediaFromUrl(mediaUrl, {
-    maxBytes: opts.maxBytes,
-    mediaAccess: opts.mediaAccess,
-    mediaLocalRoots: opts.mediaLocalRoots,
-    mediaReadFile: opts.mediaReadFile,
-  } as never);
+  let media: Awaited<ReturnType<typeof loadOutboundMediaFromUrl>>;
+  try {
+    media = await loadOutboundMediaFromUrl(mediaUrl, {
+      maxBytes: opts.maxBytes,
+      mediaAccess: opts.mediaAccess,
+      mediaLocalRoots: opts.mediaLocalRoots,
+      mediaReadFile: opts.mediaReadFile,
+    } as never);
+  } catch (error) {
+    logXmppSend(`media load failed url=${mediaUrl} error=${describeError(error)}`);
+    if (/^https?:\/\//i.test(mediaUrl)) {
+      const fallbackText = caption
+        ? `${caption}\n\n[media unavailable] ${mediaUrl}`
+        : `[media unavailable] ${mediaUrl}`;
+      const id = nextStanzaId();
+      await connection.send(xml("message", { type, to: target, id }, xml("body", {}, fallbackText)));
+      recordXmppOutboundActivity(account.accountId);
+      return {
+        messageId: id,
+        target,
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [{ channel: "xmpp", messageId: id, conversationId: target }],
+          kind: "media",
+        }),
+      };
+    }
+    throw error;
+  }
 
   const filename = media.fileName ?? mediaUrl.split("/").pop()?.split("?")[0] ?? "file";
   const id = nextStanzaId();
 
   const uploadResult = await uploadFileXmpp(connection.xmpp, domain, filename, media.buffer);
   if (!uploadResult.ok) {
+    const failedUpload = uploadResult as Extract<typeof uploadResult, { ok: false }>;
+    logXmppSend(
+      `media upload unavailable url=${mediaUrl} filename=${filename} reason=${failedUpload.reason}` +
+        `${failedUpload.status !== undefined ? ` status=${failedUpload.status}` : ""}` +
+        `${failedUpload.error ? ` error=${failedUpload.error}` : ""}`,
+    );
     // No upload component, or the PUT failed -- degrade to a plain link
     // rather than silently dropping the attachment.
     const fallbackText = caption
@@ -550,6 +597,25 @@ export async function sendFileXmpp(
  * try/catch-and-log-debug behavior; a failed typing indicator must never
  * fail the calling turn.
  */
+/**
+ * Devuelve al contacto a "disponible" cuando el busy caducó sin que nadie
+ * llamara a clearTypingXmpp() (turno abortado, excepción, proceso caído). Sin
+ * esto el <presence> dnd que ya recibió el servidor se queda ahí: el agente
+ * aparece "ocupado" indefinidamente aunque no esté haciendo nada.
+ */
+function publishExpiredBusyPresence(accountId: string, target: string | null | undefined): void {
+  if (!target) return;
+  const connection = getActiveXmppConnection(accountId);
+  if (!connection?.isConnected()) return;
+  try {
+    void connection.send(buildStatusPresence(target, "available"));
+  } catch {
+    // best-effort: la presencia se recalcula igual en la próxima conexión.
+  }
+}
+
+registerActivityExpiryHandler(publishExpiredBusyPresence);
+
 export async function sendTypingXmpp(to: string, opts: SendXmppOptions): Promise<void> {
   const cfg = requireRuntimeConfig(opts.cfg, "XMPP typing") as CoreConfig;
   const account = resolveXmppAccount({ cfg, accountId: opts.accountId });
