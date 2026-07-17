@@ -48,7 +48,9 @@
               "anyOf": [
                 {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": {
+                    "type": "string"
+                  }
                 },
                 {
                   "type": "object",
@@ -56,7 +58,13 @@
                   "properties": {
                     "inlineButtons": {
                       "type": "string",
-                      "enum": ["off", "dm", "group", "all", "allowlist"]
+                      "enum": [
+                        "off",
+                        "dm",
+                        "group",
+                        "all",
+                        "allowlist"
+                      ]
                     }
                   }
                 }
@@ -93,5 +101,13 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/icarito/claudio-w"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/ws": "^8.18.1",
+    "@types/xmpp__client": "^0.14.1",
+    "@types/xmpp__xml": "^0.14.0",
+    "openclaw": "^2026.7.1",
+    "typescript": "^7.0.2"
   }
 }

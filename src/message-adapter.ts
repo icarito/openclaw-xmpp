@@ -3,6 +3,15 @@ import { defineChannelMessageAdapter } from "openclaw/plugin-sdk/channel-outboun
 import { sendEditXmpp, sendFileXmpp, sendMessageXmpp, sendPayloadXmpp } from "./send.js";
 import type { CoreConfig } from "./types.js";
 
+function mediaLoaderOptions(params: Record<string, unknown>) {
+  return {
+    ...(typeof params.maxBytes === "number" ? { maxBytes: params.maxBytes } : {}),
+    ...(params.mediaAccess !== undefined ? { mediaAccess: params.mediaAccess } : {}),
+    ...(params.mediaLocalRoots !== undefined ? { mediaLocalRoots: params.mediaLocalRoots } : {}),
+    ...(params.mediaReadFile !== undefined ? { mediaReadFile: params.mediaReadFile } : {}),
+  };
+}
+
 export const xmppMessageAdapter = defineChannelMessageAdapter({
   id: "xmpp",
   presentationCapabilities: {
@@ -41,7 +50,8 @@ export const xmppMessageAdapter = defineChannelMessageAdapter({
     // a plain link if no upload component is discoverable. See send.ts's
     // sendFileXmpp doc comment for why this differs from IRC's "just paste
     // the URL as text" media handler.
-    media: async ({ cfg, to, text, mediaUrl, accountId, replyToId }) => {
+    media: async (params) => {
+      const { cfg, to, text, mediaUrl, accountId, replyToId } = params;
       if (!mediaUrl) {
         return await sendMessageXmpp(to, text, {
           cfg: cfg as CoreConfig,
@@ -53,6 +63,7 @@ export const xmppMessageAdapter = defineChannelMessageAdapter({
         cfg: cfg as CoreConfig,
         accountId: accountId ?? undefined,
         replyTo: replyToId ?? undefined,
+        ...mediaLoaderOptions(params as Record<string, unknown>),
       });
     },
     edit: async ({ cfg, to, text, accountId, editTargetId }) =>
@@ -60,12 +71,14 @@ export const xmppMessageAdapter = defineChannelMessageAdapter({
         cfg: cfg as CoreConfig,
         accountId: accountId ?? undefined,
       }),
-    payload: async ({ cfg, to, text, payload, mediaUrl, accountId, replyToId }) => {
+    payload: async (params) => {
+      const { cfg, to, text, payload, mediaUrl, accountId, replyToId } = params;
       if (mediaUrl) {
         return await sendFileXmpp(to, text, mediaUrl, {
           cfg: cfg as CoreConfig,
           accountId: accountId ?? undefined,
           replyTo: replyToId ?? undefined,
+          ...mediaLoaderOptions(params as Record<string, unknown>),
         });
       }
       return await sendPayloadXmpp(to, text, payload, {

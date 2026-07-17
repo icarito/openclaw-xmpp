@@ -82,7 +82,7 @@ export function mimeForFilename(filename: string): string {
 
 export type UploadResult =
   | { ok: true; getUrl: string }
-  | { ok: false; reason: "no-upload-service" | "no-slot" | "missing-urls" | "put-failed"; status?: number };
+  | { ok: false; reason: "no-upload-service" | "no-slot" | "missing-urls" | "put-failed"; status?: number; error?: string };
 
 /**
  * Request an upload slot (XEP-0363) and PUT the file bytes. Returns the
@@ -134,14 +134,23 @@ export async function uploadFileXmpp(
   const headerEls = putEl?.getChildren("header") ?? [];
   for (const h of headerEls) {
     const hname = h.attrs.name as string | undefined;
-    if (hname) putHeaders[hname] = h.text();
+    if (hname && hname.toLowerCase() !== "content-length") putHeaders[hname] = h.text();
   }
 
-  const putRes = await fetch(putUrl, {
-    method: "PUT",
-    headers: { "Content-Type": mime, "Content-Length": String(data.length), ...putHeaders },
-    body: data,
-  });
+  let putRes: Response;
+  try {
+    putRes = await fetch(putUrl, {
+      method: "PUT",
+      headers: { "Content-Type": mime, ...putHeaders },
+      body: data as unknown as BodyInit,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "put-failed",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 
   if (!putRes.ok && putRes.status !== 201) {
     return { ok: false, reason: "put-failed", status: putRes.status };
