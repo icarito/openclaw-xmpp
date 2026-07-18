@@ -120,7 +120,17 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
   // channel.ts's approvalCapability.nativeRuntime is never invoked by the
   // core -- see startChannelApprovalHandlerBootstrap, which only starts on a
   // "registered" channel-runtime-context event.
+  //
+  // OFF BY DEFAULT (XMPP_NATIVE_APPROVAL_DELIVERY=1 to enable): incident
+  // 2026-07-18 23:10 UTC -- with the route registered, the core stopped
+  // forwarder card delivery (native route claims the request) but the native
+  // runtime never delivered either (handler start was a silent no-op --
+  // ctx.channelRuntime plumbing unverified on this gateway build), leaving an
+  // INVISIBLE pending approval and an in-line-waiting turn stalled until the
+  // approval expired. Re-enable only after the native delivery path is
+  // verified end-to-end (card sent by xmpp/approvals logger + XEP-0308 edit).
   if (
+    process.env.XMPP_NATIVE_APPROVAL_DELIVERY === "1" &&
     (account.config.allowFrom ?? []).length > 0 &&
     resolveInlineButtonsScope(account.config.capabilities) !== "off"
   ) {
