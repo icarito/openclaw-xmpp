@@ -79,7 +79,8 @@ export function createXmppProgressController(params: {
     lastFlushAt = Date.now();
     try {
       if (progressMessageId) {
-        await sendEditXmpp(params.target, text, progressMessageId, sendOpts);
+        // Parcial intermedio: ephemeral => <no-store/>, sin push ni MAM.
+        await sendEditXmpp(params.target, text, progressMessageId, { ...sendOpts, ephemeral: true });
       } else {
         // Nota: sendMessageXmpp emite <active/> y presencia "available" al
         // final; el heartbeat del turno re-publica composing/dnd enseguida,
@@ -218,7 +219,8 @@ export function createXmppProgressController(params: {
     // sólo con las líneas de tools para no duplicar el texto parcial.
     if (partialText.trim() && lastSentText !== compositorText) {
       try {
-        await sendEditXmpp(params.target, compositorText.trim() || "✔", bubbleId, sendOpts);
+        // Colapso cosmético de la burbuja (la respuesta real va aparte).
+        await sendEditXmpp(params.target, compositorText.trim() || "✔", bubbleId, { ...sendOpts, ephemeral: true });
       } catch {
         // best-effort
       }

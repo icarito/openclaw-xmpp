@@ -732,7 +732,16 @@ export async function sendEditXmpp(
   to: string,
   text: string,
   editTargetId: string,
-  opts: SendXmppOptions,
+  opts: SendXmppOptions & {
+    /**
+     * Edición intermedia de la burbuja de streaming: lleva <no-store/>
+     * (XEP-0334) para que mod_cloud_notify no dispare un push por CADA
+     * parcial (decenas por turno = el spam de notificaciones) y el MAM no
+     * archive cada versión intermedia. La edición FINAL (la respuesta real)
+     * va sin el hint: esa sí debe notificar y quedar en el archivo.
+     */
+    ephemeral?: boolean;
+  },
 ): Promise<SendXmppResult> {
   const cfg = requireRuntimeConfig(opts.cfg, "XMPP edit") as CoreConfig;
   const account = resolveXmppAccount({ cfg, accountId: opts.accountId });
@@ -754,6 +763,7 @@ export async function sendEditXmpp(
       { type, to: target, id },
       xml("body", {}, body),
       xml("replace", { xmlns: "urn:xmpp:message-correct:0", id: editTargetId }),
+      ...(opts.ephemeral ? [xml("no-store", { xmlns: "urn:xmpp:hints" })] : []),
     ),
   );
   recordXmppOutboundActivity(account.accountId);
