@@ -1,16 +1,22 @@
 // Xmpp plugin module implements outbound base behavior.
 import { sanitizeForPlainText } from "openclaw/plugin-sdk/channel-outbound";
 import { sanitizeAssistantVisibleText } from "openclaw/plugin-sdk/text-chunking";
+import type { ChannelOutboundPayloadHint } from "openclaw/plugin-sdk/channel-contract";
 import { chunkTextForOutbound } from "./channel-api.js";
 
 /**
- * XMPP must retain the deterministic same-chat approval payload. Unlike the
- * built-in native approval clients, a shared approval forwarder can accept a
- * request without actually resolving an XMPP delivery target. Suppressing the
- * local payload in that case leaves a live approval with no card at all.
+ * XMPP must retain the deterministic same-chat approval payload UNLESS the
+ * native approval runtime (approval-handler.runtime.ts, registered via
+ * registerChannelRuntimeContext in monitor.ts) is the one actually delivering
+ * it. A shared approval forwarder can accept a request without resolving an
+ * XMPP delivery target -- suppressing based on forwarder config alone (the
+ * old approach) risked a live approval with no card at all. `hint.nativeRouteActive`
+ * is the core's own signal that a native runtime for this channel/account is
+ * live right now, so suppressing on it can't produce that failure mode: if
+ * the native runtime is active, it IS delivering the compact card.
  */
-function shouldSuppressLocalXmppApprovalPrompt(): boolean {
-  return false;
+function shouldSuppressLocalXmppApprovalPrompt(hint?: ChannelOutboundPayloadHint): boolean {
+  return hint?.kind === "approval-pending" && hint.nativeRouteActive === true;
 }
 
 export const xmppOutboundBaseAdapter = {
@@ -24,7 +30,8 @@ export const xmppOutboundBaseAdapter = {
     context: true,
     divider: true,
   },
-  shouldSuppressLocalPayloadPrompt: () => shouldSuppressLocalXmppApprovalPrompt(),
+  shouldSuppressLocalPayloadPrompt: ({ hint }: { hint?: ChannelOutboundPayloadHint }) =>
+    shouldSuppressLocalXmppApprovalPrompt(hint),
   renderPresentation: async ({
     payload,
     presentation,
