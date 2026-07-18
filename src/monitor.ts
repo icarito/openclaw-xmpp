@@ -6,6 +6,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
+import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
+import type { ChannelRuntimeSurface } from "openclaw/plugin-sdk/channel-contract";
 import { resolveXmppAccount } from "./accounts.js";
 import { connectXmppClient, type XmppConnection } from "./client.js";
 import { registerActiveXmppConnection, unregisterActiveXmppConnection } from "./connection-registry.js";
@@ -13,6 +16,7 @@ import { handleXmppInbound } from "./inbound.js";
 import { bareJid, isGroupJid } from "./normalize.js";
 import { extractOobUrl, extractReply, isStaleDelayedStanza, makeXmppMessageId, messageMentionsBot } from "./protocol.js";
 import { registerXmppCommands, type XmppCommandRuntime } from "./commands.js";
+import { resolveInlineButtonsScope } from "./outbound-render.js";
 import { startTelemetryLoop, type TelemetryLoopHandle } from "./telemetry.js";
 import type { RuntimeEnv } from "./runtime-api.js";
 import { getXmppRuntime } from "./runtime.js";
@@ -25,6 +29,8 @@ type XmppMonitorOptions = {
   abortSignal?: AbortSignal;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
   onMessage?: (message: XmppInboundMessage) => void | Promise<void>;
+  /** Forwarded from gateway.startAccount's ctx so the native approval runtime can register itself, same as Telegram's monitor.ts. */
+  channelRuntime?: ChannelRuntimeSurface;
 };
 
 const XMPP_MONITOR_RECONNECT_DELAY_MS = 1000;
@@ -106,6 +112,27 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     channel: "xmpp",
     accountId: account.accountId,
   });
+
+  // Native exec/plugin approval runtime (approval-handler.runtime.ts): only
+  // register when the account can actually receive approvals (approvers
+  // configured + inline controls on), same gate as its
+  // availability.isConfigured. Without this registration the runtime in
+  // channel.ts's approvalCapability.nativeRuntime is never invoked by the
+  // core -- see startChannelApprovalHandlerBootstrap, which only starts on a
+  // "registered" channel-runtime-context event.
+  if (
+    (account.config.allowFrom ?? []).length > 0 &&
+    resolveInlineButtonsScope(account.config.capabilities) !== "off"
+  ) {
+    registerChannelRuntimeContext({
+      channelRuntime: opts.channelRuntime,
+      channelId: "xmpp",
+      accountId: account.accountId,
+      capability: CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY,
+      context: { accountId: account.accountId },
+      abortSignal: opts.abortSignal,
+    });
+  }
 
   let connection: XmppConnection | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;

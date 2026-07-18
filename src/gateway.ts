@@ -2,6 +2,7 @@
 import { runStoppablePassiveMonitor } from "openclaw/plugin-sdk/extension-shared";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
+import type { ChannelRuntimeSurface } from "openclaw/plugin-sdk/channel-contract";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { createAccountStatusSink } from "./channel-api.js";
 import type { RuntimeEnv } from "./runtime-api.js";
@@ -16,6 +17,7 @@ export async function startXmppGatewayAccount(ctx: {
   runtime: RuntimeEnv;
   abortSignal: AbortSignal;
   setStatus: (next: ChannelAccountSnapshot) => void;
+  channelRuntime?: ChannelRuntimeSurface;
   log?: {
     info?: (message: string) => void;
   };
@@ -41,6 +43,7 @@ export async function startXmppGatewayAccount(ctx: {
         runtime: ctx.runtime,
         abortSignal: ctx.abortSignal,
         statusSink,
+        channelRuntime: ctx.channelRuntime,
       }),
   });
 }
