@@ -1,0 +1,10 @@
+schema: spec-driven
+
+context: |
+  Plugin de canal XMPP para OpenClaw >= 2026.6.9, escrito en TypeScript.
+  El checkout de este repo no es producción. El servicio real carga el código
+  desplegado en `/opt/claudio-w/extensions-xmpp-src/` en el servidor.
+  `claudio-w` consume este repo como submódulo en `extensions/xmpp/`.
+  Antes de cerrar un change ejecutar la comprobación TypeScript disponible y
+  documentar cualquier incompatibilidad preexistente con el SDK de OpenClaw.
+
