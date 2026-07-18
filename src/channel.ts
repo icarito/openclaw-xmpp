@@ -318,6 +318,26 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
           senderId,
         }),
       }),
+      // Sin esto, isKnownNativeApprovalPromptChannel()/hasNativeApprovalPromptRuntimeCapability()
+      // dan false para xmpp (no está en el set fijo del core) y el agente recibe el prompt
+      // fallback genérico en vez de "STOP the turn immediately" — sigue reintentando el mismo
+      // exec mientras la aprobación está pendiente, chocando en bucle contra el guard
+      // single-pending-approval-per-session del servidor. Las cards con botones ya se entregan
+      // bien vía el forwarder; esto solo declara la capability para el prompt del modelo.
+      native: {
+        describeDeliveryCapabilities: ({ cfg, accountId }) => {
+          const enabled = isXmppInlineButtonsEnabled({
+            cfg: cfg as CoreConfig,
+            accountId,
+          });
+          return {
+            enabled,
+            preferredSurface: "origin",
+            supportsOriginSurface: enabled,
+            supportsApproverDmSurface: false,
+          };
+        },
+      },
       render: {
         exec: {
           buildPendingPayload: ({ request, nowMs }) => {
