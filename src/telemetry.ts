@@ -461,6 +461,18 @@ function readCurrentTool(entries: ReturnType<typeof loadEntriesFromFile>): { nam
   return null;
 }
 
+function describeToolActivity(name: string): string {
+  const normalized = name.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "exec" || normalized.includes("command")) return "Ejecutando un comando";
+  if (normalized === "read" || normalized.includes("file")) return "Leyendo archivos";
+  if (normalized === "apply_patch" || normalized.includes("edit")) return "Editando archivos";
+  if (normalized.includes("web") || normalized.includes("search")) return "Consultando la web";
+  if (normalized.includes("browser")) return "Navegando en la web";
+  if (normalized.includes("image")) return "Procesando una imagen";
+  if (normalized.includes("message")) return "Enviando un mensaje";
+  return `Usando ${name}`;
+}
+
 /** Reads real telemetry for this account's bound agent from its most recent session transcript. Returns null telemetry (inert) if the account isn't bound to an agent yet, or that agent has no session file -- never fabricates numbers. */
 export function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { show: Show; status: string; telemetry: AgentTelemetry | null } {
   const inert = { show: "chat" as Show, status: "OpenClaw connected", telemetry: null };
@@ -542,8 +554,12 @@ export function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount
   // hardcoded to a constant string here, which is why the desktop/Android
   // "Trabajando" / "Usando herramienta: X" chip stopped updating after the
   // OpenClaw port -- this had never actually been wired up.
-  if (paused) return { show: "away", status: tool ? `Paused: ${tool}` : "Paused", telemetry };
-  if (busy) return { show: "dnd", status: tool ? `Tool: ${tool}` : "Working", telemetry };
+  if (paused) return { show: "away", status: tool ? `Pausado · ${describeToolActivity(tool)}` : "Pausado", telemetry };
+  if (busy) return {
+    show: "dnd",
+    status: tool ? describeToolActivity(tool) : "Analizando la solicitud",
+    telemetry,
+  };
   return { show: "chat", status: "Available", telemetry };
 }
 
