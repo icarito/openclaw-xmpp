@@ -9,6 +9,8 @@ import {
   resolveExecApprovalCommandDisplay,
   resolveExecApprovalRequestAllowedDecisions,
 } from "openclaw/plugin-sdk/approval-runtime";
+import { createLazyChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
+import type { ChannelApprovalNativeRuntimeAdapter } from "openclaw/plugin-sdk/approval-handler-runtime";
 import {
   adaptScopedAccountAccessor,
   createScopedChannelConfigAdapter,
@@ -338,6 +340,29 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
           };
         },
       },
+      // Fase 1 de xmpp-native-approval-runtime: el adapter queda cableado y
+      // verificable de forma aislada. El turno del agente NO espera in-línea
+      // todavía -- eso depende de que xmpp entre a NATIVE_APPROVAL_CHANNELS
+      // en el core (fase 2, requiere confirmación explícita porque afecta las
+      // 8 cuentas a la vez). Hasta entonces este runtime queda inerte salvo
+      // que algo del core lo invoque explícitamente para otros fines.
+      nativeRuntime: createLazyChannelApprovalNativeRuntimeAdapter({
+        eventKinds: ["exec", "plugin"],
+        isConfigured: ({ cfg, accountId }) =>
+          isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId }),
+        shouldHandle: ({ cfg, accountId, request }) => {
+          const account = resolveXmppAccount({ cfg: cfg as CoreConfig, accountId: accountId ?? undefined });
+          if (!account.configured || (account.config.allowFrom ?? []).length === 0) return false;
+          if (!isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId })) return false;
+          const turnSourceChannel = String(request.request.turnSourceChannel ?? "").trim().toLowerCase();
+          if (turnSourceChannel !== "xmpp") return false;
+          const turnSourceAccountId = String(request.request.turnSourceAccountId ?? "").trim();
+          return !turnSourceAccountId || turnSourceAccountId === account.accountId;
+        },
+        load: async () =>
+          (await import("./approval-handler.runtime.js"))
+            .xmppApprovalNativeRuntime as unknown as ChannelApprovalNativeRuntimeAdapter,
+      }),
       render: {
         exec: {
           buildPendingPayload: ({ request, nowMs }) => {
