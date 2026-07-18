@@ -328,10 +328,17 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
       // bien vía el forwarder; esto solo declara la capability para el prompt del modelo.
       native: {
         describeDeliveryCapabilities: ({ cfg, accountId }) => {
-          const enabled = isXmppInlineButtonsEnabled({
-            cfg: cfg as CoreConfig,
-            accountId,
-          });
+          // Gated with the runtime registration (monitor.ts): declaring
+          // enabled=true makes the core suppress the normal forwarder card,
+          // expecting the native surface to deliver -- with delivery off that
+          // left registered approvals INVISIBLE and in-line-waiting turns
+          // stalled until expiry (operator, 2026-07-18 23:19 UTC).
+          const enabled =
+            process.env.XMPP_NATIVE_APPROVAL_DELIVERY === "1" &&
+            isXmppInlineButtonsEnabled({
+              cfg: cfg as CoreConfig,
+              accountId,
+            });
           return {
             enabled,
             preferredSurface: "origin",
