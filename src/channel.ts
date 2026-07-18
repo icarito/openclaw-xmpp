@@ -320,56 +320,50 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
           senderId,
         }),
       }),
-      // Sin esto, isKnownNativeApprovalPromptChannel()/hasNativeApprovalPromptRuntimeCapability()
-      // dan false para xmpp (no está en el set fijo del core) y el agente recibe el prompt
-      // fallback genérico en vez de "STOP the turn immediately" — sigue reintentando el mismo
-      // exec mientras la aprobación está pendiente, chocando en bucle contra el guard
-      // single-pending-approval-per-session del servidor. Las cards con botones ya se entregan
-      // bien vía el forwarder; esto solo declara la capability para el prompt del modelo.
-      native: {
-        describeDeliveryCapabilities: ({ cfg, accountId }) => {
-          // Gated with the runtime registration (monitor.ts): declaring
-          // enabled=true makes the core suppress the normal forwarder card,
-          // expecting the native surface to deliver -- with delivery off that
-          // left registered approvals INVISIBLE and in-line-waiting turns
-          // stalled until expiry (operator, 2026-07-18 23:19 UTC).
-          const enabled =
-            process.env.XMPP_NATIVE_APPROVAL_DELIVERY === "1" &&
-            isXmppInlineButtonsEnabled({
-              cfg: cfg as CoreConfig,
-              accountId,
-            });
-          return {
-            enabled,
-            preferredSurface: "origin",
-            supportsOriginSurface: enabled,
-            supportsApproverDmSurface: false,
-          };
-        },
-      },
-      // Fase 1 de xmpp-native-approval-runtime: el adapter queda cableado y
-      // verificable de forma aislada. El turno del agente NO espera in-línea
-      // todavía -- eso depende de que xmpp entre a NATIVE_APPROVAL_CHANNELS
-      // en el core (fase 2, requiere confirmación explícita porque afecta las
-      // 8 cuentas a la vez). Hasta entonces este runtime queda inerte salvo
-      // que algo del core lo invoque explícitamente para otros fines.
-      nativeRuntime: createLazyChannelApprovalNativeRuntimeAdapter({
-        eventKinds: ["exec", "plugin"],
-        isConfigured: ({ cfg, accountId }) =>
-          isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId }),
-        shouldHandle: ({ cfg, accountId, request }) => {
-          const account = resolveXmppAccount({ cfg: cfg as CoreConfig, accountId: accountId ?? undefined });
-          if (!account.configured || (account.config.allowFrom ?? []).length === 0) return false;
-          if (!isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId })) return false;
-          const turnSourceChannel = String(request.request.turnSourceChannel ?? "").trim().toLowerCase();
-          if (turnSourceChannel !== "xmpp") return false;
-          const turnSourceAccountId = String(request.request.turnSourceAccountId ?? "").trim();
-          return !turnSourceAccountId || turnSourceAccountId === account.accountId;
-        },
-        load: async () =>
-          (await import("./approval-handler.runtime.js"))
-            .xmppApprovalNativeRuntime as unknown as ChannelApprovalNativeRuntimeAdapter,
-      }),
+      // GATE COMPLETO tras XMPP_NATIVE_APPROVAL_DELIVERY: el core decide
+      // "este canal tiene UI nativa de aprobaciones" por la PRESENCIA de
+      // capability.native/nativeRuntime (channelPluginHasNativeApprovalPromptUi
+      // chequea truthiness, no el enabled interno) y entonces SUPRIME la card
+      // del forwarder esperando que la superficie nativa entregue. Con la
+      // entrega apagada eso dejó aprobaciones INVISIBLES y turnos esperando
+      // in-línea hasta expirar (operator, 2026-07-18 23:19 y 23:25 UTC —
+      // devolver enabled=false no bastó). Ambas propiedades deben OMITIRSE
+      // del objeto salvo que la entrega nativa esté activa de verdad.
+      ...(process.env.XMPP_NATIVE_APPROVAL_DELIVERY === "1"
+        ? {
+            native: {
+              describeDeliveryCapabilities: ({ cfg, accountId }: { cfg: unknown; accountId?: string | null }) => {
+                const enabled = isXmppInlineButtonsEnabled({
+                  cfg: cfg as CoreConfig,
+                  accountId,
+                });
+                return {
+                  enabled,
+                  preferredSurface: "origin" as const,
+                  supportsOriginSurface: enabled,
+                  supportsApproverDmSurface: false,
+                };
+              },
+            },
+            nativeRuntime: createLazyChannelApprovalNativeRuntimeAdapter({
+              eventKinds: ["exec", "plugin"],
+              isConfigured: ({ cfg, accountId }) =>
+                isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId }),
+              shouldHandle: ({ cfg, accountId, request }) => {
+                const account = resolveXmppAccount({ cfg: cfg as CoreConfig, accountId: accountId ?? undefined });
+                if (!account.configured || (account.config.allowFrom ?? []).length === 0) return false;
+                if (!isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId })) return false;
+                const turnSourceChannel = String(request.request.turnSourceChannel ?? "").trim().toLowerCase();
+                if (turnSourceChannel !== "xmpp") return false;
+                const turnSourceAccountId = String(request.request.turnSourceAccountId ?? "").trim();
+                return !turnSourceAccountId || turnSourceAccountId === account.accountId;
+              },
+              load: async () =>
+                (await import("./approval-handler.runtime.js"))
+                  .xmppApprovalNativeRuntime as unknown as ChannelApprovalNativeRuntimeAdapter,
+            }),
+          }
+        : {}),
       render: {
         exec: {
           buildPendingPayload: ({ request, nowMs }) => {
