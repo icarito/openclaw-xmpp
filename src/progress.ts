@@ -135,6 +135,23 @@ export function createXmppProgressController(params: {
     queueRender();
   };
 
+  /** Immediate acknowledgement. It becomes the progress/final bubble through
+   * XEP-0308, so feedback does not add a second permanent message. */
+  const start = async () => {
+    if (!active || progressMessageId) return;
+    partialText = "Recibido · preparando…";
+    queueRender();
+    await closeWindow();
+  };
+
+  /** A visible turn may legitimately end without a reply payload (for
+   * example, a tool-only agent turn). Never leave the acknowledgement or
+   * pending state hanging in that case. */
+  const finishWithoutReply = async () => {
+    if (!active) return;
+    await finalizeWithFinalText("Turno completado sin respuesta visible.");
+  };
+
   /**
    * Se llama antes de entregar cualquier respuesta visible del agente. NO
    * cierra nada (la burbuja sigue viva para las tools que vengan después);
@@ -219,7 +236,7 @@ export function createXmppProgressController(params: {
     detailMode?: "explain" | "raw";
   }) => {
     if (payload.phase === "start") {
-      toolsInWindow += 1;
+      toolsInTurn += 1;
     }
     await compositor.pushToolProgress(
       buildChannelProgressDraftLineForEntry(
@@ -359,6 +376,8 @@ export function createXmppProgressController(params: {
     handlePartialReply,
     handlePatchSummary,
     handleToolStart,
+    finishWithoutReply,
+    start,
     suppressDefaultToolProgressMessages: compositor.suppressDefaultToolProgressMessages,
   };
 }

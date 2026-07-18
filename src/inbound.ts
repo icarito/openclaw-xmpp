@@ -471,6 +471,8 @@ export async function handleXmppInbound(params: {
     target: peerId,
     log: (line) => runtime.log?.(line),
   });
+  await progress.start();
+  let deliveredVisibleReply = false;
 
   await core.channel.inbound.dispatchReply({
     cfg: config as OpenClawConfig,
@@ -484,6 +486,7 @@ export async function handleXmppInbound(params: {
     dispatchReplyWithBufferedBlockDispatcher: core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
     delivery: {
       deliver: async (payload) => {
+        deliveredVisibleReply = true;
         const p = payload as OutboundReplyPayload & {
           presentation?: unknown;
           mediaUrl?: string | null;
@@ -545,4 +548,7 @@ export async function handleXmppInbound(params: {
       },
     },
   });
+  if (!deliveredVisibleReply) {
+    await progress.finishWithoutReply();
+  }
 }
