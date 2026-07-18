@@ -1,7 +1,7 @@
 // Xmpp plugin module: wires XEP-0050 ad-hoc command nodes to OpenClaw's
 // REAL native command registry/dispatch pipeline, the same mechanism
 // Telegram's bot-native-commands.ts uses for its /context, /compact,
-// /clear, /model slash commands.
+// /reset, /new, /model slash commands.
 //
 // How this was found (see PORT-NOTES.md "2026-07 update" for the full
 // writeup): the previous agent's "blocking question" -- whether a primitive
@@ -54,11 +54,11 @@ const NATIVE_COMMAND_PROVIDER = "xmpp";
  * an explicit allowlist (rather than dumping every "essential"/"standard"
  * tier command into the ad-hoc menu) because many registry commands assume
  * a richer UI (inline keyboards, argument menus) this plugin doesn't render
- * -- context/compact/clear/model are the ones the user explicitly asked to
- * align with Telegram, and they all degrade fine to "one XEP-0004 text-single
+ * -- context/compact/reset/new/model are the session controls we align with
+ * Telegram, and they all degrade fine to "one XEP-0004 text-single
  * field, or zero fields for a no-arg invocation".
  */
-const EXPOSED_NATIVE_COMMAND_KEYS = ["context", "compact", "clear", "model"];
+const EXPOSED_NATIVE_COMMAND_KEYS = ["context", "compact", "reset", "new", "model"];
 
 /**
  * Build one XmppAction per exposed native command, keyed by the registry's
@@ -88,7 +88,7 @@ export function buildNativeCommandActions(params: {
       description: spec.description,
       // A single free-text param when the command accepts one (compact's
       // optional instructions, model's optional model id); no params for a
-      // bare invocation like /clear. XEP-0004 forms + the /oc textual
+      // bare invocation like /reset. XEP-0004 forms + the /oc textual
       // fallback both already handle zero-param actions as immediate
       // (no-prompt) execution -- see actions.ts's ActionParam.required.
       params: argDef
@@ -101,7 +101,7 @@ export function buildNativeCommandActions(params: {
             },
           ]
         : [],
-      mutating: spec.name !== "context", // context is read-only; compact/clear/model change session state
+      mutating: spec.name !== "context", // context is read-only; the others change session state
       handler: async (formParams, ctx?: ActionContext) => {
         if (!ctx?.fromJid) {
           return "Cannot run this command: no requesting JID available.";

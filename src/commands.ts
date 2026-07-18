@@ -4,7 +4,7 @@
 // model instead of agentGroupId/sqlite.
 //
 // See PORT-NOTES.md ("2026-07 update") for the full writeup. Summary:
-//   - context/compact/clear/model -- LIVE. Wired to OpenClaw's real native
+//   - context/compact/reset/new/model -- LIVE. Wired to OpenClaw's real native
 //     command registry (openclaw/plugin-sdk/command-auth-native, the same
 //     module Telegram's bot-native-commands.ts uses) via
 //     native-commands.ts's buildNativeCommandActions(). Invoking one of
@@ -28,8 +28,9 @@
 //     tools.exec policy without waking an agent, so routine policy changes do
 //     not themselves create approval loops.
 // What IS live: the XEP-0050/XEP-0004 protocol machinery itself (xep-0050.ts,
-// xep-0004.ts), the textual /oc fallback, and now the four native session
-// commands via native-commands.ts.
+// xep-0004.ts), the textual /oc fallback, and now the five native session
+// commands via native-commands.ts. Typed /clear remains a compatibility alias
+// normalized to /reset before it reaches OpenClaw.
 import type { Element } from "@xmpp/xml";
 import { xml } from "@xmpp/client";
 import { buildModelsProviderData } from "openclaw/plugin-sdk/models-provider-runtime";
@@ -40,7 +41,7 @@ import { buildNativeCommandActions, dispatchNativeCommandText } from "./native-c
 import { Xep0050Handler } from "./xep-0050.js";
 import { TextualFallback } from "./textual-fallback.js";
 import { buildCorrectionStanza, buildQueryCommandStanza, buildQuickResponseStanza, resolveInlineButtonsScope } from "./outbound-render.js";
-import { clearXmppCommandNodes, consumeXmppCommandNode, consumeXmppCommandResponse, registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
+import { clearXmppCommandNodes, consumeXmppCommandNode, consumeXmppCommandResponse, registerXmppCommandNode, registerXmppCommandResponse, restoreXmppCommandNode } from "./command-node-registry.js";
 import { normalizeXmppOptions, matchOptionReply, shortQuestionId } from "./ask-question.js";
 import { clearXmppAccountActivity } from "./activity-registry.js";
 import { getActiveXmppConnection } from "./connection-registry.js";
@@ -115,7 +116,7 @@ function buildAccountActions(params: {
       // "status".
       handler: () => "Use /oc or !oc to list commands, or the Execute Command menu in your client.",
     },
-    // context/compact/clear/model -- see native-commands.ts. These call
+    // context/compact/reset/new/model -- see native-commands.ts. These call
     // into OpenClaw's real native command registry, the same one Telegram
     // uses for its slash commands.
     ...buildNativeCommandActions({ account, cfg, runtime }),
@@ -207,15 +208,24 @@ export function registerXmppCommands(params: {
       const entry = consumeXmppCommandNode(account.accountId, cmdNode);
       if (entry) {
         if (isResetOrClearCommandText(entry.commandText)) clearPending();
-        dispatchNativeCommandText({
-          commandText: entry.commandText,
-          fromJid: from,
-          account,
-          cfg,
-          runtime,
-        }).catch((err) => {
+        try {
+          // Do not acknowledge the IQ before the native /approve command has
+          // actually traversed OpenClaw's inbound pipeline. The old fire-and-
+          // forget path returned “Command submitted” even when dispatch failed,
+          // causing clients to delete the only actionable approval card while
+          // the gateway kept the request pending.
+          await dispatchNativeCommandText({
+            commandText: entry.commandText,
+            fromJid: from,
+            account,
+            cfg,
+            runtime,
+          });
+        } catch (err) {
+          restoreXmppCommandNode(account.accountId, cmdNode, entry);
           runtime.error?.(`xmpp command button dispatch failed: ${String(err)}`);
-        });
+          throw err;
+        }
       }
       const sessionId = `oc-cmd-${Date.now().toString(36)}`;
       const iqResult = xml(

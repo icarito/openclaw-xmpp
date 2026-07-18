@@ -57,6 +57,16 @@ export function consumeXmppCommandNode(accountId: string, node: string): Command
   return entry;
 }
 
+/** Restore an atomically-consumed node when downstream command dispatch fails. */
+export function restoreXmppCommandNode(
+  accountId: string,
+  node: string,
+  entry: CommandNodeEntry,
+): void {
+  if (entry.expiresAt <= Date.now()) return;
+  getRegistry().set(key(accountId, node), entry);
+}
+
 export function registerXmppCommandResponse(params: {
   accountId: string;
   jid: string;

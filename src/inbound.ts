@@ -206,6 +206,11 @@ async function downloadInboundAttachment(params: {
   }
 }
 
+/** Keep the legacy client command as a strict alias, before agent dispatch. */
+export function normalizeXmppControlCommand(text: string): string {
+  return /^\/clear$/i.test(text) ? "/reset" : text;
+}
+
 export async function handleXmppInbound(params: {
   message: XmppInboundMessage;
   account: ResolvedXmppAccount;
@@ -222,7 +227,7 @@ export async function handleXmppInbound(params: {
     accountId: account.accountId,
   });
 
-  const rawBody = message.text?.trim() ?? "";
+  const rawBody = normalizeXmppControlCommand(message.text?.trim() ?? "");
   // An inbound attachment (XEP-0363 upload link carried as an XEP-0066 OOB
   // <x><url/></x>) may arrive with an empty body. Don't drop it: monitor.ts
   // already surfaces the link as message.oobUrl, and it's fed to the agent as
