@@ -37,7 +37,12 @@ import { bareJid, buildXmppAllowlistCandidates, normalizeXmppAllowEntry } from "
 import { resolveXmppGroupMatch, resolveXmppGroupRequireMention } from "./policy.js";
 import { getXmppRuntime } from "./runtime.js";
 import { createXmppProgressController } from "./progress.js";
-import { sendMessageXmpp, sendPayloadXmpp, sendPendingStatusXmpp } from "./send.js";
+import {
+  sendMessageXmpp,
+  sendPayloadXmpp,
+  sendPendingStatusXmpp,
+  sendTypingXmpp,
+} from "./send.js";
 import { getXmppAccountActivity } from "./activity-registry.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
 
@@ -458,6 +463,15 @@ export async function handleXmppInbound(params: {
   // sin respuesta, pero eso no es una presencia real ni lo ven otros clientes.
   const pendingCount = getXmppAccountActivity(account.accountId)?.pendingCount ?? 0;
   await sendPendingStatusXmpp(peerId, pendingCount + 1, {
+    cfg: config,
+    accountId: account.accountId,
+  }).catch(() => {});
+
+  // El heartbeat del core es periódico y algunas rutas/session keys pueden
+  // tardar en iniciarlo. Publicar busy + composing aquí garantiza feedback
+  // activo para TODAS las cuentas XMPP antes de entrar al modelo; el heartbeat
+  // queda como refresco y sendMessage/clearTyping restaura available al final.
+  await sendTypingXmpp(peerId, {
     cfg: config,
     accountId: account.accountId,
   }).catch(() => {});
