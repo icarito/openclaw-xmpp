@@ -36,6 +36,7 @@ import type { ResolvedXmppAccount } from "./accounts.js";
 import { bareJid, buildXmppAllowlistCandidates, normalizeXmppAllowEntry } from "./normalize.js";
 import { resolveXmppGroupMatch, resolveXmppGroupRequireMention } from "./policy.js";
 import { getXmppRuntime } from "./runtime.js";
+import { createXmppProgressController } from "./progress.js";
 import { sendMessageXmpp, sendPayloadXmpp, sendPendingStatusXmpp } from "./send.js";
 import { getXmppAccountActivity } from "./activity-registry.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
@@ -46,6 +47,14 @@ type XmppReplyOptions = {
   streamingBehavior: "steer";
   skillFilter?: string[];
   disableBlockStreaming?: boolean;
+  suppressDefaultToolProgressMessages?: boolean;
+  preserveProgressCallbackStartOrder?: boolean;
+  onPartialReply?: (payload: never) => Promise<void> | void;
+  onToolStart?: (payload: never) => Promise<void> | void;
+  onItemEvent?: (payload: never) => Promise<void> | void;
+  onApprovalEvent?: (payload: never) => Promise<void> | void;
+  onCommandOutput?: (payload: never) => Promise<void> | void;
+  onPatchSummary?: (payload: never) => Promise<void> | void;
 };
 
 const xmppIngressIdentity = defineStableChannelIngressIdentity({
@@ -381,6 +390,7 @@ export async function handleXmppInbound(params: {
     sessionStore: config.session?.store,
   });
 
+  console.error();
   const fromLabel = message.isGroup ? message.target : senderDisplay;
   // An attachment-only message has no text; give the envelope a readable stand-in
   // so the agent sees "there is a file" rather than an empty turn. The real link
@@ -452,6 +462,16 @@ export async function handleXmppInbound(params: {
     accountId: account.accountId,
   }).catch(() => {});
 
+  // Progreso en vivo tipo Telegram: una burbuja editada con XEP-0308 mientras
+  // corren herramientas/comandos. Sólo se engancha si la cuenta tiene
+  // streaming.mode="progress"; si no, el objeto queda inerte y no agrega nada.
+  const progress = createXmppProgressController({
+    cfg: config,
+    account,
+    target: peerId,
+    log: (line) => runtime.log?.(line),
+  });
+
   await core.channel.inbound.dispatchReply({
     cfg: config as OpenClawConfig,
     channel: CHANNEL_ID,
@@ -464,6 +484,26 @@ export async function handleXmppInbound(params: {
     dispatchReplyWithBufferedBlockDispatcher: core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
     delivery: {
       deliver: async (payload) => {
+        const p = payload as OutboundReplyPayload & {
+          presentation?: unknown;
+          mediaUrl?: string | null;
+          channelData?: Record<string, unknown>;
+          text?: string | null;
+        };
+        // Finalización de preview estilo Telegram: una respuesta de texto puro
+        // convierte la burbuja de progreso en la respuesta final (una última
+        // corrección XEP-0308) en vez de llegar como mensaje aparte.
+        if (p.text && !p.presentation && !p.mediaUrl && !p.channelData) {
+          const handled = await progress.finalizeWithFinalText(p.text);
+          if (handled) {
+            statusSink?.({ lastOutboundAt: Date.now() });
+            return;
+          }
+        } else {
+          // Payload no finalizable (media/card): drenar la edición pendiente
+          // para que la burbuja esté al día antes de la respuesta.
+          await progress.closeWindow();
+        }
         await deliverXmppReply({
           payload,
           cfg: config,
@@ -486,6 +526,18 @@ export async function handleXmppInbound(params: {
       skillFilter: groupMatch.groupConfig?.skills,
       disableBlockStreaming:
         typeof blockStreamingEnabled === "boolean" ? !blockStreamingEnabled : undefined,
+      ...(progress.active
+        ? {
+            suppressDefaultToolProgressMessages: progress.suppressDefaultToolProgressMessages,
+            preserveProgressCallbackStartOrder: true,
+            onPartialReply: progress.handlePartialReply,
+            onToolStart: progress.handleToolStart,
+            onItemEvent: progress.handleItemEvent,
+            onApprovalEvent: progress.handleApprovalEvent,
+            onCommandOutput: progress.handleCommandOutput,
+            onPatchSummary: progress.handlePatchSummary,
+          }
+        : {}),
     } as XmppReplyOptions,
     record: {
       onRecordError: (err) => {

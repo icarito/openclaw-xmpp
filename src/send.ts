@@ -197,11 +197,11 @@ function recordXmppOutboundActivity(accountId: string): void {
 }
 
 function logXmppSend(message: string): void {
-  try {
-    (getXmppRuntime() as { log?: (message: string) => void }).log?.(`[xmpp] ${message}`);
-  } catch {
-    // Runtime may not be initialized in isolated tests.
-  }
+  // console.error (→ openclaw.error.log): el log del runtime del plugin se
+  // filtra del archivo principal, y estas líneas de diagnóstico ("payload
+  // controls=...") nunca aparecían — eso ya produjo un diagnóstico falso de
+  // "sendPayloadXmpp nunca corre". stderr sí persiste.
+  console.error(`[xmpp] ${message}`);
 }
 
 function describeError(error: unknown): string {
@@ -437,11 +437,18 @@ export async function sendPayloadXmpp(
       const interactive = normalizeInteractiveReply(payload.interactive);
       return interactive ? interactiveReplyToPresentation(interactive) : undefined;
     })();
-  const fallback = renderMessagePresentationFallbackText({
-    presentation,
-    text: text || payload.text || null,
-    emptyFallback: "Approval required.",
-  });
+  const explicitText = (text || payload.text || "").trim();
+  // Approval payloads already carry a channel-specific compact rendering.
+  // Re-rendering their presentation here resurrects the verbose core fallback
+  // (including empty warning fences, the full UUID and policy metadata) and
+  // effectively discards that compact text.
+  const fallback = xmppData?.approval && explicitText
+    ? explicitText
+    : renderMessagePresentationFallbackText({
+        presentation,
+        text: explicitText || null,
+        emptyFallback: "Approval required.",
+      });
   const controls = collectPresentationControls(presentation);
   if (controls.length === 0) {
     controls.push(...collectApprovalFallbackControls(fallback));

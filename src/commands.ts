@@ -46,6 +46,7 @@ import { clearXmppAccountActivity } from "./activity-registry.js";
 import { getActiveXmppConnection } from "./connection-registry.js";
 import { isGroupJid } from "./normalize.js";
 import { nextStanzaId } from "./protocol.js";
+import { formatCreditReport, readAgentTelemetry } from "./telemetry.js";
 import type { RuntimeEnv } from "./runtime-api.js";
 import type { CoreConfig } from "./types.js";
 
@@ -96,6 +97,14 @@ function buildAccountActions(params: {
       handler: () => `Connected as ${account.jid} (accountId=${account.accountId}).`,
     },
     {
+      node: "credit",
+      name: "Crédito y consumo",
+      description: "Separa memoria activa, consumo de sesión y coste local del día.",
+      params: [],
+      mutating: false,
+      handler: () => formatCreditReport(readAgentTelemetry(cfg, account).telemetry),
+    },
+    {
       node: "help",
       name: "OpenClaw: help",
       description: "Lists available commands.",
@@ -111,14 +120,6 @@ function buildAccountActions(params: {
     // uses for its slash commands.
     ...buildNativeCommandActions({ account, cfg, runtime }),
     buildApprovalModeAction({ account, cfg }),
-    buildApprovalModeAction({
-      account,
-      cfg,
-      node: "approval-bypass",
-      name: "Approvals: bypass / whitelist",
-      description:
-        "Compatible command for clients: on=auto allowlist+flash reviewer, off=ask, full=broad bypass, deny=block exec.",
-    }),
   ];
 }
 
@@ -297,6 +298,14 @@ export function registerXmppCommands(params: {
       }).catch((err) => {
         runtime.error?.(`xmpp quick response dispatch failed: ${String(err)}`);
       });
+      return true;
+    }
+
+    // Universal alias for clients (notably gtk-llm-chat-android) that do not
+    // expose XEP-0050 command discovery yet. This is answered locally and
+    // never wakes or bills the agent.
+    if (/^\/(?:credit|credito|crédito)\s*$/i.test(body.trim())) {
+      sendPlain(jid, formatCreditReport(readAgentTelemetry(cfg, account).telemetry));
       return true;
     }
 

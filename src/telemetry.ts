@@ -46,6 +46,7 @@ const RECENT_TOOL_TTL_MS = 90_000;
 export interface AgentTelemetry {
   contextUsed: number | null;
   contextMax: number;
+  contextMaxSource: "config" | "model-table" | "fallback";
   tokens: { total: number; input: number; output: number; requests: number } | null;
   cost: number | null;
   sessionCost: number | null;
@@ -116,7 +117,12 @@ function buildDirectedStatusPresence(accountId: string, to: string, t: AgentTele
 function buildTelemetryItem(t: AgentTelemetry, node = TELEMETRY_NODE): Element {
   const children: Element[] = [];
   if (t.contextUsed !== null) {
-    children.push(xml("context", { used: String(t.contextUsed), max: String(t.contextMax) }));
+    children.push(xml("context", {
+      used: String(t.contextUsed),
+      max: String(t.contextMax),
+      scope: "active",
+      maxSource: t.contextMaxSource,
+    }));
   }
   if (t.tokens) {
     children.push(
@@ -125,12 +131,13 @@ function buildTelemetryItem(t: AgentTelemetry, node = TELEMETRY_NODE): Element {
         input: String(t.tokens.input),
         output: String(t.tokens.output),
         requests: String(t.tokens.requests),
+        scope: "session",
       }),
     );
   }
-  if (t.cost !== null) children.push(xml("cost", { usd: t.cost.toFixed(4) }));
-  if (t.sessionCost !== null) children.push(xml("session-cost", { usd: t.sessionCost.toFixed(4) }));
-  if (t.dayCost !== null) children.push(xml("day-cost", { usd: t.dayCost.toFixed(4) }));
+  if (t.cost !== null) children.push(xml("cost", { usd: t.cost.toFixed(4), scope: "last-request" }));
+  if (t.sessionCost !== null) children.push(xml("session-cost", { usd: t.sessionCost.toFixed(4), scope: "session" }));
+  if (t.dayCost !== null) children.push(xml("day-cost", { usd: t.dayCost.toFixed(4), scope: "day-local" }));
   if (t.model) children.push(xml("model", {}, t.model));
   if (t.tool) children.push(xml("tool", {}, t.tool));
   if (t.sessionStatus) children.push(xml("session", { status: t.sessionStatus }));
@@ -182,6 +189,7 @@ function telemetryChanged(prev: AgentTelemetry | null, next: AgentTelemetry): bo
   ) return true;
   if (prev.cost !== next.cost || prev.sessionCost !== next.sessionCost || prev.dayCost !== next.dayCost) return true;
   if (prev.contextMax !== next.contextMax) return true;
+  if (prev.contextMaxSource !== next.contextMaxSource) return true;
   const before = prev.contextUsed ?? -1;
   const after = next.contextUsed ?? -1;
   return Math.abs(after - before) >= TELEMETRY_CONTEXT_DELTA;
@@ -195,6 +203,27 @@ const CONTEXT_MAX_BY_MODEL: Record<string, number> = {
   "deepseek-reasoner": 131072,
 };
 const DEFAULT_CONTEXT_MAX = 131072;
+
+function resolveContextWindow(cfg: CoreConfig, model: string | null): {
+  tokens: number;
+  source: AgentTelemetry["contextMaxSource"];
+} {
+  if (model) {
+    const providers = (cfg as unknown as {
+      models?: { providers?: Record<string, { models?: Array<{ id?: unknown; contextWindow?: unknown }> }> };
+    }).models?.providers;
+    for (const provider of Object.values(providers ?? {})) {
+      const configured = provider.models?.find(
+        (candidate) => typeof candidate.id === "string" && (candidate.id === model || model.endsWith(`/${candidate.id}`)),
+      );
+      const tokens = Number(configured?.contextWindow);
+      if (Number.isFinite(tokens) && tokens > 0) return { tokens, source: "config" };
+    }
+    const known = CONTEXT_MAX_BY_MODEL[model];
+    if (known) return { tokens: known, source: "model-table" };
+  }
+  return { tokens: DEFAULT_CONTEXT_MAX, source: "fallback" };
+}
 
 /** Finds this account's bound agentId via the top-level `bindings` route array (same structure `openclaw agents bindings` reads). */
 function resolveAgentIdForAccount(cfg: CoreConfig, account: ResolvedXmppAccount): string | null {
@@ -293,12 +322,12 @@ function sumUsage(entries: ReturnType<typeof loadEntriesFromFile>): UsageTotals 
 }
 
 function activeContextTokens(usage: NonNullable<ReturnType<typeof getLastAssistantUsage>>): number | null {
-  const input = Number(usage.input ?? 0);
-  const output = Number(usage.output ?? 0);
-  const active = (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0);
-  if (active > 0) return active;
+  // OpenClaw's helper prefers the provider's contextUsage snapshot and only
+  // falls back to total/input/output/cache counters. input+output alone is
+  // provider accounting, not the live prompt snapshot, and made this gauge
+  // disagree with /status (especially when prompt caching is active).
   const calculated = calculateContextTokens(usage);
-  return Number.isFinite(calculated) ? calculated : null;
+  return Number.isFinite(calculated) && calculated > 0 ? calculated : null;
 }
 
 function readDayUsage(sessionsDir: string): UsageTotals | null {
@@ -433,7 +462,7 @@ function readCurrentTool(entries: ReturnType<typeof loadEntriesFromFile>): { nam
 }
 
 /** Reads real telemetry for this account's bound agent from its most recent session transcript. Returns null telemetry (inert) if the account isn't bound to an agent yet, or that agent has no session file -- never fabricates numbers. */
-function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { show: Show; status: string; telemetry: AgentTelemetry | null } {
+export function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { show: Show; status: string; telemetry: AgentTelemetry | null } {
   const inert = { show: "chat" as Show, status: "OpenClaw connected", telemetry: null };
   const agentId = resolveAgentIdForAccount(cfg, account);
   if (!agentId) return inert;
@@ -458,7 +487,8 @@ function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { sh
   const model = typeof lastMessageEntry?.message?.model === "string" ? lastMessageEntry.message.model : null;
 
   const contextUsed = activeContextTokens(usage);
-  const contextMax = (model && CONTEXT_MAX_BY_MODEL[model]) || DEFAULT_CONTEXT_MAX;
+  const contextWindow = resolveContextWindow(cfg, model);
+  const contextMax = contextWindow.tokens;
   const toolState = readCurrentTool(entries);
   // Sólo anunciamos la herramienta mientras de verdad está corriendo: el nombre
   // sobrevive a la llamada (readCurrentTool lo devuelve con active:false cuando
@@ -488,6 +518,7 @@ function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { sh
   const telemetry: AgentTelemetry = {
     contextUsed,
     contextMax,
+    contextMaxSource: contextWindow.source,
     tokens: {
       total: sessionTotals.total || usage.totalTokens || 0,
       input: sessionTotals.input || usage.input || 0,
@@ -514,6 +545,31 @@ function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount): { sh
   if (paused) return { show: "away", status: tool ? `Paused: ${tool}` : "Paused", telemetry };
   if (busy) return { show: "dnd", status: tool ? `Tool: ${tool}` : "Working", telemetry };
   return { show: "chat", status: "Available", telemetry };
+}
+
+/** Human-readable, zero-inference usage report for menus and text clients. */
+export function formatCreditReport(t: AgentTelemetry | null): string {
+  if (!t) return "Aún no hay telemetría para una sesión de este agente.";
+  const lines: string[] = [];
+  if (t.contextUsed === null) {
+    lines.push("Memoria activa: sin datos todavía.");
+  } else {
+    const pct = Math.round((t.contextUsed / t.contextMax) * 100);
+    const sourceNote = t.contextMaxSource === "fallback" ? " (límite estimado)" : "";
+    lines.push(`Memoria activa: ${t.contextUsed.toLocaleString("es")} / ${t.contextMax.toLocaleString("es")} tokens (${pct}%)${sourceNote}.`);
+  }
+  if (t.tokens) {
+    lines.push(`Consumo de esta sesión: ${t.tokens.total.toLocaleString("es")} tokens en ${t.tokens.requests.toLocaleString("es")} peticiones.`);
+  }
+  if (t.sessionCost !== null) lines.push(`Coste de esta sesión: US$ ${t.sessionCost.toFixed(4)}.`);
+  if (t.dayCost !== null) lines.push(`Coste local de hoy: US$ ${t.dayCost.toFixed(4)}.`);
+  if (t.cost !== null) lines.push(`Última petición: US$ ${t.cost.toFixed(4)}.`);
+  if (t.tokens && t.sessionCost !== null && t.tokens.requests > 0) {
+    lines.push(`Promedio observado: US$ ${(t.sessionCost / t.tokens.requests).toFixed(4)} por petición.`);
+  }
+  lines.push("El porcentaje mide memoria activa, no crédito ni gasto acumulado.");
+  lines.push("Los importes provienen de los logs locales; no representan el saldo restante del proveedor.");
+  return lines.join("\n");
 }
 
 export type TelemetryLoopHandle = { stop: () => void };
