@@ -25,6 +25,7 @@ import type {
   ExecApprovalRequest,
   PluginApprovalRequest,
 } from "openclaw/plugin-sdk/approval-runtime";
+import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway-runtime";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeOptionalLowercaseString, normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveXmppAccount } from "./accounts.js";
@@ -44,17 +45,37 @@ function cancelRepromptByApprovalId(approvalId: string): void {
   }
 }
 
+/** Datos mínimos para cancelar una card ya entregada desde fuera del ciclo
+ *  del core (ver cancelApprovalsForSession). */
+export type XmppInFlightApproval = {
+  approvalId: string;
+  jid: string;
+  stanzaId: string;
+  accountId?: string;
+  commandText?: string;
+};
+
 /** Una sola aprobación pendiente por sesión. Ver incidente 2026-07-19:
  *  2 exec calls paralelos del mismo turno → 2 approvals → el manager
  *  upstream pierde la segunda → Promise huérfana → turno bloqueado.
  *  Prevenimos en origen: la segunda approval se rechaza a nivel plugin
- *  y el core devuelve un error al agente. */
-const activeSessionApprovals = new Set<string>();
+ *  y el core devuelve un error al agente.
+ *
+ *  Es un Map y no un Set porque además de ocupar la ranura guarda con qué
+ *  card se ocupó: sin eso no se puede cancelar al morir la sesión. El valor
+ *  se completa en deliverPending (la ranura se toma antes de tener stanzaId,
+ *  así que arranca en undefined). */
+const activeSessionApprovals = new Map<string, XmppInFlightApproval | undefined>();
 
 function trackApproval(sessionKey: string): boolean {
   if (activeSessionApprovals.has(sessionKey)) return false;
-  activeSessionApprovals.add(sessionKey);
+  activeSessionApprovals.set(sessionKey, undefined);
   return true;
+}
+
+function rememberInFlightApproval(sessionKey: string, entry: XmppInFlightApproval): void {
+  if (!activeSessionApprovals.has(sessionKey)) return;
+  activeSessionApprovals.set(sessionKey, entry);
 }
 
 function untrackApproval(sessionKey: string): void {
@@ -72,6 +93,86 @@ class XmppApprovalGuardRejection extends Error {
 
 function isGuardRejection(error: unknown): boolean {
   return error instanceof XmppApprovalGuardRejection;
+}
+
+/** Terminal en el gateway: la decisión ya no está pendiente. Tratarlo como
+ *  éxito hace la cancelación idempotente (mismo criterio que
+ *  tryResolveXmppApprovalCommand en native-commands.ts). */
+function isAlreadyTerminal(error: unknown): boolean {
+  return /already resolved|no longer pending|not found|expired/i.test(String(error));
+}
+
+/**
+ * Cancela las aprobaciones en vuelo de una sesión que terminó.
+ *
+ * Sin esto, una aprobación cuya sesión murió se queda en pantalla hasta que
+ * vence su timeout: el core no tiene ninguna salida por sesión (resolve /
+ * expire / consumeAllowOnce, ninguna acepta sessionKey), y `onStopped` del
+ * runtime nativo tampoco edita las cards.
+ *
+ * ALCANCE REAL: hoy solo la invoca el hook `session_end` (ver index.ts), que
+ * cubre reciclado de sesión y apagado ordenado del gateway. Un turno abortado
+ * o caído con la aprobación pendiente NO llega aquí — ver la nota en index.ts
+ * sobre por qué agent_end no sirve. Esas cards siguen expirando por timeout.
+ *
+ * Orden deliberado — primero el gateway, después la card:
+ * `resolveApprovalOverGateway` con `deny` saca la entrada de pendientes, así
+ * que una respuesta tardía desde otro cliente recibe "already resolved" en vez
+ * de despertar una sesión nueva con el resultado de un exec sin contexto (el
+ * guard `session_rebound` NO cubre este caso: su predicado exige que el
+ * sessionId resuelto exista y difiera, y con la sesión muerta es undefined).
+ * Si esa resolución falla no editamos nada: es preferible una card viva que
+ * decir "cancelada" sobre algo que el usuario todavía puede aprobar.
+ *
+ * `deny` y no otra decisión porque además activa `shouldSuppressExecDeniedFollowup`
+ * en el core, la única supresión de followup que existe.
+ */
+export async function cancelApprovalsForSession(params: {
+  cfg: CoreConfig;
+  sessionKey: string;
+  reason: string;
+}): Promise<void> {
+  const inFlight = activeSessionApprovals.get(params.sessionKey);
+  if (!inFlight) return;
+
+  try {
+    await resolveApprovalOverGateway({
+      cfg: params.cfg,
+      approvalId: inFlight.approvalId,
+      decision: "deny",
+      senderId: "xmpp-session-cancel",
+      clientDisplayName: "XMPP session cancel",
+      allowPluginFallback: true,
+    });
+  } catch (error) {
+    if (!isAlreadyTerminal(error)) {
+      log.warn(
+        `xmpp approvals: no se pudo cancelar ${inFlight.approvalId} en el gateway (${params.reason}): ${String(error)} — la card queda viva a propósito`,
+      );
+      return;
+    }
+  }
+
+  untrackApproval(params.sessionKey);
+  cancelRepromptByApprovalId(inFlight.stanzaId);
+
+  try {
+    const { sendEditXmpp } = await loadXmppSendRuntime();
+    const suffix = inFlight.commandText ? ` — ${inFlight.commandText}` : "";
+    await sendEditXmpp(
+      inFlight.jid,
+      `🛑 Aprobación cancelada: la sesión terminó${suffix}`,
+      inFlight.stanzaId,
+      { cfg: params.cfg, accountId: inFlight.accountId },
+    );
+    log.info(
+      `xmpp approvals: cancelada ${inFlight.approvalId} por fin de sesión (${params.reason})`,
+    );
+  } catch (error) {
+    // El gateway ya la denegó, así que el estado es consistente aunque la
+    // edición no llegue; los clientes la retirarán por expiry.
+    log.warn(`xmpp approvals: cancelación entregada a medias: ${String(error)}`);
+  }
 }
 
 type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
@@ -355,6 +456,18 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
           }
         }, repromptDelay);
         repromptTimers.set(stanzaKey, timer);
+      }
+
+      // Guardamos con qué card se ocupó la ranura del guard: es lo único que
+      // permite cancelarla si la sesión muere antes de que el usuario decida.
+      if (guardSessionKey) {
+        rememberInFlightApproval(guardSessionKey, {
+          approvalId: request.id,
+          jid: result.target,
+          stanzaId: result.messageId,
+          accountId: deliveryAccountId,
+          commandText: view.approvalKind === "exec" ? view.commandText : undefined,
+        });
       }
 
       return {
