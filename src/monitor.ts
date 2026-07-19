@@ -40,6 +40,10 @@ type XmppMonitorOptions = {
 const XMPP_MONITOR_RECONNECT_DELAY_MS = 1000;
 const XMPP_INBOUND_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
 
+/** Instancia única del handler nativo de aprobaciones por cuenta (ver el
+ * bloque de arranque en monitorXmppProvider — evita cards duplicadas). */
+const nativeApprovalHandlers = new Map<string, ChannelApprovalHandler>();
+
 type RecentInboundEntry = { key: string; at: number };
 
 function hashText(text: string): string {
@@ -132,6 +136,16 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     (account.config.allowFrom ?? []).length > 0 &&
     resolveInlineButtonsScope(account.config.capabilities) !== "off"
   ) {
+    // SINGLETON por cuenta: los re-arranques del provider (restart policy del
+    // gateway, reloads) volvían a entrar aquí sin que la instancia anterior
+    // muriera, acumulando N handlers → N cards duplicadas por approval
+    // (~3x medido el 2026-07-19: 51 entregas para 18 approvals).
+    const staleHandler = nativeApprovalHandlers.get(account.accountId);
+    if (staleHandler) {
+      nativeApprovalHandlers.delete(account.accountId);
+      await staleHandler.stop().catch(() => {});
+      logger.info?.("stopped stale native approval handler instance");
+    }
     logger.info?.("starting native approval handler directly");
     nativeApprovalHandler = await createChannelApprovalHandlerFromCapability({
       capability: {
@@ -149,6 +163,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     if (!nativeApprovalHandler) {
       throw new Error("XMPP native approval capability did not create a handler");
     }
+    nativeApprovalHandlers.set(account.accountId, nativeApprovalHandler);
     await nativeApprovalHandler.start();
     logger.info?.("native approval handler started");
   }
@@ -390,6 +405,9 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       }
       telemetryLoop?.stop();
       telemetryLoop = null;
+      if (nativeApprovalHandler && nativeApprovalHandlers.get(account.accountId) === nativeApprovalHandler) {
+        nativeApprovalHandlers.delete(account.accountId);
+      }
       void nativeApprovalHandler?.stop();
       nativeApprovalHandler = null;
       unregisterActiveXmppConnection(account.accountId);
