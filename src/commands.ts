@@ -37,7 +37,7 @@ import { buildModelsProviderData } from "openclaw/plugin-sdk/models-provider-run
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { buildApprovalModeAction } from "./approval-mode.js";
 import { createActionDispatcher, type XmppAction } from "./actions.js";
-import { buildNativeCommandActions, dispatchNativeCommandText } from "./native-commands.js";
+import { buildNativeCommandActions, dispatchNativeCommandText, tryResolveXmppApprovalCommand } from "./native-commands.js";
 import { Xep0050Handler } from "./xep-0050.js";
 import { TextualFallback } from "./textual-fallback.js";
 import { buildCorrectionStanza, buildQueryCommandStanza, buildQuickResponseStanza, resolveInlineButtonsScope } from "./outbound-render.js";
@@ -295,6 +295,21 @@ export function registerXmppCommands(params: {
 
   const handleMessage = (jid: string, body: string, _stanza?: Element): boolean => {
     if (isResetOrClearCommandText(body)) clearPending();
+
+    // Approval decisions are control-plane traffic. They must never enter
+    // the per-session agent queue because that queue is occupied by the exec
+    // call waiting for this very decision.
+    if (/^\/approve\s+/i.test(body.trim())) {
+      tryResolveXmppApprovalCommand({
+        commandText: body,
+        fromJid: jid,
+        account,
+        cfg,
+      }).catch((err) => {
+        runtime.error?.(`xmpp approval command failed: ${String(err)}`);
+      });
+      return true;
+    }
 
     const responseEntry = consumeXmppCommandResponse(account.accountId, jid, body);
     if (responseEntry) {

@@ -84,7 +84,6 @@ export function buildQuickResponseStanza(
   const bodyText = cleanBody.toLowerCase().startsWith(cleanTitle.toLowerCase())
     ? cleanBody
     : `${cleanTitle}${cleanBody ? `\n\n${cleanBody}` : ""}`;
-  const hasCommandItems = (metadata?.commandItems?.length ?? 0) > 0;
   const quickResponseReference = xml(
     "reference",
     { xmlns: QR_NS, type: "action" },
@@ -119,7 +118,12 @@ export function buildQuickResponseStanza(
   const query = queryItems.length > 0
     ? [xml("query", { xmlns: DISCO_ITEMS_NS, node: COMMAND_NS }, ...queryItems)]
     : [];
-  const quickResponsePayload = hasCommandItems ? [] : [quickResponseReference, ...quickResponses];
+  // Emit both representations. Some XMPP servers/libraries discard a
+  // disco#items extension embedded in <message>; retaining XEP-0439 gives
+  // clients an actionable fallback instead of a text-only approval. Clients
+  // that understand commandItems already prefer XEP-0050, so this does not
+  // cause double submission.
+  const quickResponsePayload = [quickResponseReference, ...quickResponses];
   return xml("message", { type, to, id }, xml("body", {}, bodyText), ...quickResponsePayload, ...query);
 }
 

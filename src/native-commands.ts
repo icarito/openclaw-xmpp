@@ -40,14 +40,66 @@ import {
   findCommandByNativeName,
   listNativeCommandSpecsForConfig,
 } from "openclaw/plugin-sdk/command-auth-native";
+import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway-runtime";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import type { ActionContext, XmppAction } from "./actions.js";
 import { handleXmppInbound } from "./inbound.js";
 import { makeXmppMessageId } from "./protocol.js";
+import { normalizeXmppAllowEntry } from "./normalize.js";
 import type { RuntimeEnv } from "./runtime-api.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
 
 const NATIVE_COMMAND_PROVIDER = "xmpp";
+
+const APPROVE_COMMAND_RE = /^\/approve\s+([A-Za-z0-9][A-Za-z0-9._:-]*)\s+(allow-once|allow-always|always|deny)\b/i;
+
+/**
+ * Resolve approvals through the gateway control socket, outside the agent
+ * session queue. Sending /approve through dispatchReply can deadlock: the
+ * session is already occupied by the exec call waiting for this decision.
+ */
+export async function tryResolveXmppApprovalCommand(params: {
+  commandText: string;
+  fromJid: string;
+  account: ResolvedXmppAccount;
+  cfg: CoreConfig;
+}): Promise<boolean> {
+  const match = params.commandText.trim().match(APPROVE_COMMAND_RE);
+  if (!match) return false;
+
+  const sender = normalizeXmppAllowEntry(params.fromJid);
+  const authorized = (params.account.config.allowFrom ?? []).some((entry) => {
+    const normalized = normalizeXmppAllowEntry(String(entry));
+    return normalized === "*" || normalized === sender;
+  });
+  if (!sender || !authorized) {
+    throw new Error(`Unauthorized XMPP approval sender: ${params.fromJid}`);
+  }
+
+  try {
+    await resolveApprovalOverGateway({
+      cfg: params.cfg,
+      approvalId: match[1]!,
+      decision: (match[2]!.toLowerCase() === "always" ? "allow-always" : match[2]!.toLowerCase()) as
+        | "allow-once"
+        | "allow-always"
+        | "deny",
+      senderId: sender,
+      clientDisplayName: `XMPP approval (${sender})`,
+      allowPluginFallback: true,
+    });
+  } catch (error) {
+    // First writer wins in the gateway. A second device can race with the
+    // XEP-0308 correction; treating the already-terminal state as success
+    // makes the button operation idempotent and lets that client close its
+    // local card instead of offering a misleading retry.
+    const message = String(error);
+    if (!/already resolved|no longer pending|not found|expired/i.test(message)) {
+      throw error;
+    }
+  }
+  return true;
+}
 
 /**
  * Session-style commands to expose via XEP-0050, by registry `key`. Kept to
@@ -158,6 +210,10 @@ export async function dispatchNativeCommandText(params: {
   runtime: RuntimeEnv;
 }): Promise<void> {
   const { commandText, fromJid, account, cfg, runtime } = params;
+
+  if (await tryResolveXmppApprovalCommand({ commandText, fromJid, account, cfg })) {
+    return;
+  }
 
   const message: XmppInboundMessage = {
     messageId: makeXmppMessageId(),

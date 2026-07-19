@@ -242,8 +242,8 @@ function buildStatusPresence(
   // quinto valor entre disponible y ocupado, así que un cliente que sólo mira
   // el color ya ve "ausente" -- el texto en <status> (el contador) es lo que
   // distingue "llegó un mensaje" de "está pausado a propósito".
-  const show = activity === "processing" ? "dnd" : (activity === "paused" || activity === "pending") ? "away" : undefined;
-  const defaultStatus = activity === "processing" ? "Trabajando"
+  const show = (activity === "processing" || activity === "paused" || activity === "pending") ? "away" : undefined;
+  const defaultStatus = activity === "processing" ? "Procesando"
     : activity === "paused" ? "Ausente"
     : activity === "pending" ? "Mensaje recibido"
     : "Disponible";
@@ -686,7 +686,7 @@ export async function sendTypingXmpp(to: string, opts: SendXmppOptions): Promise
   const connection = getActiveXmppConnection(account.accountId);
   if (!connection?.isConnected()) return;
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
-  setXmppAccountActivity(account.accountId, "busy", target);
+  setXmppAccountActivity(account.accountId, "processing", target);
   try {
     if (type === "chat") await connection.send(buildStatusPresence(target, "processing"));
     await connection.send(

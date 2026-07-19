@@ -42,6 +42,10 @@ const TELEMETRY_NODE = "urn:openclaw:telemetry:0";
 const PRESENCE_INTERVAL_MS = 10_000;
 const TELEMETRY_CONTEXT_DELTA = 500; // tokens -- below this the gauge cannot visibly move
 const RECENT_TOOL_TTL_MS = 90_000;
+// Un toolCall persistido antes de este proceso no puede seguir ejecutándose
+// después de reiniciar el gateway. Conservarlo en la transcripción es útil,
+// pero jamás debe resucitar como presencia busy en el proceso nuevo.
+const TELEMETRY_PROCESS_STARTED_AT_MS = Date.now();
 
 export interface AgentTelemetry {
   contextUsed: number | null;
@@ -53,7 +57,7 @@ export interface AgentTelemetry {
   dayCost: number | null;
   model: string | null;
   tool: string | null;
-  activity: "available" | "busy" | "paused" | "pending";
+  activity: "available" | "processing" | "busy" | "paused" | "pending";
   availability: "available" | "busy" | "away";
   /** Sólo con activity="pending": mensajes en cola sin procesar aún. */
   pendingCount?: number;
@@ -86,6 +90,7 @@ function buildCapsPresence(accountId: string, show?: Show, status?: string): Ele
 function humanStatus(t: AgentTelemetry): string {
   if (t.tool) return `Usando herramienta: ${t.tool}`;
   if (t.activity === "busy") return "Trabajando";
+  if (t.activity === "processing") return "Procesando";
   if (t.activity === "paused") return "Ausente";
   if (t.activity === "pending") {
     const n = t.pendingCount ?? 1;
@@ -96,7 +101,7 @@ function humanStatus(t: AgentTelemetry): string {
 
 function directedShow(t: AgentTelemetry): Show | null {
   if (t.activity === "busy") return "dnd";
-  if (t.activity === "paused" || t.activity === "pending") return "away";
+  if (t.activity === "processing" || t.activity === "paused" || t.activity === "pending") return "away";
   return null;
 }
 
@@ -451,7 +456,9 @@ function readCurrentTool(entries: ReturnType<typeof loadEntriesFromFile>): { nam
       // dnd "usando exec" indefinidamente -- así se quedó Rolando ~1h.
       if (typeof item.name !== "string") return null;
       const startedAt = entryTimestampMs(entry);
-      const stale = startedAt === null || now - startedAt > RECENT_TOOL_TTL_MS;
+      const stale = startedAt === null
+        || startedAt < TELEMETRY_PROCESS_STARTED_AT_MS
+        || now - startedAt > RECENT_TOOL_TTL_MS;
       return { name: item.name, active: !stale };
     }
     // Reached an assistant turn whose tool calls are all resolved (or it had
@@ -518,14 +525,15 @@ export function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount
   // agente en dnd para siempre: una sesión que reventó se anunciaba como
   // "Trabajando" hasta la siguiente sesión.
   const sessionBusy = sessionStatus !== null && SESSION_BUSY_STATUSES.has(sessionStatus);
-  const busy = !paused && (toolState?.active === true || live?.activity === "busy" || sessionBusy);
+  const busy = !paused && (toolState?.active === true || live?.activity === "busy");
+  const processing = !paused && !busy && (live?.activity === "processing" || sessionBusy);
   // "pending" sólo se anuncia si nada más ya dice que el agente está ocupado:
   // busy siempre gana, porque ya es más informativo (el remitente ya sabe que
   // hay actividad) y setXmppAccountActivity limpia el registro de pending al
   // pasar a busy, así que en condiciones normales nunca coexisten.
-  const pending = !paused && !busy && live?.activity === "pending";
-  const activity: AgentTelemetry["activity"] = paused ? "paused" : busy ? "busy" : pending ? "pending" : "available";
-  const availability: AgentTelemetry["availability"] = paused ? "away" : busy ? "busy" : "available";
+  const pending = !paused && !busy && !processing && live?.activity === "pending";
+  const activity: AgentTelemetry["activity"] = paused ? "paused" : busy ? "busy" : processing ? "processing" : pending ? "pending" : "available";
+  const availability: AgentTelemetry["availability"] = paused || processing || pending ? "away" : busy ? "busy" : "available";
 
   const telemetry: AgentTelemetry = {
     contextUsed,
@@ -560,6 +568,7 @@ export function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount
     status: tool ? describeToolActivity(tool) : "Analizando la solicitud",
     telemetry,
   };
+  if (processing) return { show: "away", status: "Procesando la solicitud", telemetry };
   return { show: "chat", status: "Available", telemetry };
 }
 

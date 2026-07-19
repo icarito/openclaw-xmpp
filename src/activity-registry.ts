@@ -1,5 +1,5 @@
 type XmppActivity = {
-  activity: "available" | "busy" | "paused" | "pending";
+  activity: "available" | "processing" | "busy" | "paused" | "pending";
   target?: string | null;
   since: number;
   /** Sólo para "pending": cuántos mensajes de este remitente están en cola sin procesar. */
@@ -69,7 +69,7 @@ export function setXmppAccountActivity(
 
   // Sólo busy/pending caducan: available/paused son estados estables. El timer
   // es la red de seguridad para un turno que muere sin limpiar tras de sí.
-  if (activity !== "busy" && activity !== "pending") return;
+  if (activity !== "busy" && activity !== "processing" && activity !== "pending") return;
   const ttl = activity === "busy" ? BUSY_TTL_MS : PENDING_TTL_MS;
   const timer = setTimeout(() => {
     timers().delete(accountId);
@@ -86,7 +86,7 @@ export function clearXmppAccountActivity(accountId: string): XmppActivity | null
   const current = registry().get(accountId) ?? null;
   registry().delete(accountId);
   clearTimer(accountId);
-  if (current?.activity === "busy" || current?.activity === "pending") {
+  if (current?.activity === "busy" || current?.activity === "processing" || current?.activity === "pending") {
     expiryHandler()?.(accountId, current.target);
   }
   return current;
@@ -122,7 +122,7 @@ export function getXmppAccountActivity(accountId: string): XmppActivity | null {
   const current = registry().get(accountId) ?? null;
   if (!current) return null;
   const ttl = current.activity === "busy" ? BUSY_TTL_MS
-    : current.activity === "pending" ? PENDING_TTL_MS
+    : current.activity === "processing" || current.activity === "pending" ? PENDING_TTL_MS
     : null;
   if (ttl !== null && Date.now() - current.since > ttl) {
     registry().delete(accountId);
