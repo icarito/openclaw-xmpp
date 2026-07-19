@@ -122,9 +122,13 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
   // generic channel-runtime bootstrap does not observe dynamically loaded XMPP
   // accounts reliably in this build, which otherwise leaves in-line approval
   // requests pending without ever presenting their card.
+  // Piloto ampliado a toda la flota (tarea 6.6): con xmpp en
+  // NATIVE_APPROVAL_CHANNELS el turno espera in-línea para TODAS las cuentas,
+  // y channel.ts declara la superficie nativa para todas (lo que suprime la
+  // card del forwarder) -- limitar el handler a una sola cuenta dejaba al
+  // resto con aprobaciones invisibles que morían por timeout.
   if (
     process.env.XMPP_NATIVE_APPROVAL_DELIVERY === "1" &&
-    account.accountId === "operator" &&
     (account.config.allowFrom ?? []).length > 0 &&
     resolveInlineButtonsScope(account.config.capabilities) !== "off"
   ) {
