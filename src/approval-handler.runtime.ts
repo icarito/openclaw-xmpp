@@ -87,18 +87,24 @@ function shouldHandleXmppApprovalRequest(params: {
 }): boolean {
   const turnSourceChannel = normalizeOptionalLowercaseString(params.request.request.turnSourceChannel);
   const turnSourceAccountId = normalizeOptionalString(params.request.request.turnSourceAccountId);
-  const effective = { ...params, accountId: turnSourceAccountId || params.accountId };
-  if (!isXmppAccountConfiguredForApprovals(effective)) return false;
-  const resolvedAccount = resolveXmppAccount({ cfg: params.cfg, accountId: effective.accountId });
-  if (turnSourceChannel && turnSourceChannel !== "xmpp") return false;
-  if (!turnSourceChannel) {
-    const sessionKey = normalizeOptionalString(params.request.request.sessionKey);
-    if (!sessionKey?.startsWith(`agent:${resolvedAccount.accountId}:`)) return false;
+  // El ancla SIEMPRE es la cuenta PROPIA del handler (params.accountId).
+  // Con un handler por cuenta (flota completa), comparar contra una cuenta
+  // derivada del propio request hace que TODOS los handlers reclamen TODOS
+  // los approvals: un approval → 8 cards duplicadas (incidente 2026-07-19
+  // 04:26 UTC, "delivering pending card" ×8 para el mismo request).
+  const handlerAccount = resolveXmppAccount({ cfg: params.cfg, accountId: params.accountId });
+  if (
+    !isXmppAccountConfiguredForApprovals({ cfg: params.cfg, accountId: handlerAccount.accountId })
+  ) {
+    return false;
   }
-  // No explicit turnSourceAccountId on the request: fall back to matching the
-  // default/resolved account, same as a request with no account scoping.
-  if (!turnSourceAccountId) return true;
-  return turnSourceAccountId === resolvedAccount.accountId;
+  if (turnSourceChannel && turnSourceChannel !== "xmpp") return false;
+  if (turnSourceAccountId) return turnSourceAccountId === handlerAccount.accountId;
+  // Sin turnSourceAccountId: desempate único por prefijo de sessionKey
+  // (agentId == accountId en esta flota). Nunca reclamar sin ancla, o
+  // vuelven los duplicados.
+  const sessionKey = normalizeOptionalString(params.request.request.sessionKey);
+  return sessionKey?.startsWith(`agent:${handlerAccount.accountId}:`) === true;
 }
 
 function buildXmppPendingPayload(params: {
