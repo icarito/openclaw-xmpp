@@ -61,6 +61,19 @@ function untrackApproval(sessionKey: string): void {
   activeSessionApprovals.delete(sessionKey);
 }
 
+/** Rechazo por guard de concurrencia, NO un fallo de entrega.
+ *  Se distingue por tipo porque onDeliveryError debe liberar el guard cuando
+ *  la entrega falló de verdad, pero NUNCA cuando fue el propio guard quien
+ *  rechazó: ese sessionKey pertenece a la aprobación que sigue en vuelo, y
+ *  liberarlo reabriría el bug de las promesas huérfanas por otra puerta. */
+class XmppApprovalGuardRejection extends Error {
+  readonly isGuardRejection = true;
+}
+
+function isGuardRejection(error: unknown): boolean {
+  return error instanceof XmppApprovalGuardRejection;
+}
+
 type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
 
 type XmppPendingDelivery = {
@@ -107,7 +120,22 @@ function isXmppAccountConfiguredForApprovals(params: { cfg: CoreConfig; accountI
   return resolveInlineButtonsScope(account.config.capabilities) !== "off";
 }
 
-/** An approval belongs to this XMPP account only if the originating turn was XMPP on the same account. */
+/** An approval belongs to this XMPP account only if the originating turn was XMPP on the same account.
+ *
+ *  Esta función es PURA: decide, no marca. El guard de sesión
+ *  (activeSessionApprovals) se toma en deliverPending, la única fase donde
+ *  existen rutas de liberación (updateEntry / onDeliveryError).
+ *
+ *  Incidente 2026-07-19: marcar aquí filtraba el sessionKey para siempre.
+ *  shouldHandle aceptaba por el fallback de sessionKey sin exigir
+ *  turnSourceTo, pero resolveOriginTarget devuelve null sin turnSourceTo →
+ *  deliveryPlan.targets vacío → el bucle de entrega del core nunca corre →
+ *  ni deliverPending ni onDeliveryError → sessionKey trabado en un Set sin
+ *  TTL. Como trackApproval devuelve false para una clave ya marcada, UN solo
+ *  request no entregado bloqueaba TODAS las approvals futuras de esa sesión,
+ *  de forma silenciosa (el core solo reporta reportSkipped: sin card, sin
+ *  error). Por eso exigimos aquí la misma precondición que
+ *  resolveOriginTarget: si no se puede entregar, no se reclama. */
 function shouldHandleXmppApprovalRequest(params: {
   cfg: CoreConfig;
   accountId?: string;
@@ -127,10 +155,13 @@ function shouldHandleXmppApprovalRequest(params: {
     return false;
   }
   if (turnSourceChannel && turnSourceChannel !== "xmpp") return false;
+  // Sin turnSourceTo no hay destino entregable (ver resolveOriginTarget).
+  // Reclamar un approval que no podemos entregar lo deja huérfano: el core
+  // lo saca de pending y ningún otro handler lo recoge.
+  if (!normalizeOptionalString(params.request.request.turnSourceTo)) return false;
   if (turnSourceAccountId) return turnSourceAccountId === handlerAccount.accountId;
   const sessionKey = normalizeOptionalString(params.request.request.sessionKey);
-  if (!sessionKey?.startsWith(`agent:${handlerAccount.accountId}:`)) return false;
-  return trackApproval(sessionKey);
+  return Boolean(sessionKey?.startsWith(`agent:${handlerAccount.accountId}:`));
 }
 
 function buildXmppPendingPayload(params: {
@@ -269,6 +300,19 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
       },
     }),
     deliverPending: async ({ cfg, accountId, preparedTarget, pendingPayload, request, view }) => {
+      // Guard anti-paralelo: se toma AQUÍ, no en shouldHandle. Esta es la
+      // primera fase con rutas de liberación garantizadas (updateEntry al
+      // resolver/expirar, onDeliveryError al fallar). Ver nota en
+      // shouldHandleXmppApprovalRequest.
+      const guardSessionKey = normalizeOptionalString(request.request.sessionKey);
+      if (guardSessionKey && !trackApproval(guardSessionKey)) {
+        log.warn(
+          `xmpp approvals: sesión ${guardSessionKey} ya tiene una aprobación en vuelo; se omite la segunda`,
+        );
+        throw new XmppApprovalGuardRejection(
+          `xmpp approvals: aprobación concurrente rechazada para ${guardSessionKey}`,
+        );
+      }
       const deliveryAccountId = pendingPayload.accountId || preparedTarget.accountId || accountId;
       log.info(`xmpp approvals: delivering pending card to=${preparedTarget.to} account=${deliveryAccountId ?? "default"}`);
       const { sendPayloadXmpp } = await loadXmppSendRuntime();
@@ -334,6 +378,10 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
   observe: {
     onDeliveryError: ({ error, request }) => {
       log.error(`xmpp approvals: failed to deliver request ${request.id}: ${String(error)}`);
+      // El guard rechazando no es un fallo de entrega: ese sessionKey lo
+      // sostiene la aprobación que sigue en vuelo. Liberarlo aquí la dejaría
+      // desprotegida. Ver XmppApprovalGuardRejection.
+      if (isGuardRejection(error)) return;
       const sessionKey = normalizeOptionalString(request.request.sessionKey);
       if (sessionKey) untrackApproval(sessionKey);
     },
