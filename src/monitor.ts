@@ -6,10 +6,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { resolveLoggerBackedRuntime } from "openclaw/plugin-sdk/extension-shared";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
-import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
+import { createChannelApprovalHandlerFromCapability } from "openclaw/plugin-sdk/approval-handler-runtime";
+import type { ChannelApprovalHandler } from "openclaw/plugin-sdk/approval-handler-runtime";
 import type { ChannelRuntimeSurface } from "openclaw/plugin-sdk/channel-contract";
 import { resolveXmppAccount } from "./accounts.js";
+import {
+  xmppApprovalNativeAdapter,
+  xmppApprovalNativeRuntime,
+} from "./approval-handler.runtime.js";
 import { connectXmppClient, type XmppConnection } from "./client.js";
 import { registerActiveXmppConnection, unregisterActiveXmppConnection } from "./connection-registry.js";
 import { handleXmppInbound } from "./inbound.js";
@@ -113,35 +117,36 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     accountId: account.accountId,
   });
 
-  // Native exec/plugin approval runtime (approval-handler.runtime.ts): only
-  // register when the account can actually receive approvals (approvers
-  // configured + inline controls on), same gate as its
-  // availability.isConfigured. Without this registration the runtime in
-  // channel.ts's approvalCapability.nativeRuntime is never invoked by the
-  // core -- see startChannelApprovalHandlerBootstrap, which only starts on a
-  // "registered" channel-runtime-context event.
-  //
-  // OFF BY DEFAULT (XMPP_NATIVE_APPROVAL_DELIVERY=1 to enable): incident
-  // 2026-07-18 23:10 UTC -- with the route registered, the core stopped
-  // forwarder card delivery (native route claims the request) but the native
-  // runtime never delivered either (handler start was a silent no-op --
-  // ctx.channelRuntime plumbing unverified on this gateway build), leaving an
-  // INVISIBLE pending approval and an in-line-waiting turn stalled until the
-  // approval expired. Re-enable only after the native delivery path is
-  // verified end-to-end (card sent by xmpp/approvals logger + XEP-0308 edit).
+  let nativeApprovalHandler: ChannelApprovalHandler | null = null;
+  // Start the handler as part of the account monitor lifecycle. The gateway's
+  // generic channel-runtime bootstrap does not observe dynamically loaded XMPP
+  // accounts reliably in this build, which otherwise leaves in-line approval
+  // requests pending without ever presenting their card.
   if (
     process.env.XMPP_NATIVE_APPROVAL_DELIVERY === "1" &&
+    account.accountId === "operator" &&
     (account.config.allowFrom ?? []).length > 0 &&
     resolveInlineButtonsScope(account.config.capabilities) !== "off"
   ) {
-    registerChannelRuntimeContext({
-      channelRuntime: opts.channelRuntime,
-      channelId: "xmpp",
+    logger.info?.("starting native approval handler directly");
+    nativeApprovalHandler = await createChannelApprovalHandlerFromCapability({
+      capability: {
+        native: xmppApprovalNativeAdapter,
+        nativeRuntime: xmppApprovalNativeRuntime,
+      },
+      label: `xmpp/native-approvals:${account.accountId}`,
+      clientDisplayName: `XMPP Native Approvals (${account.accountId})`,
+      channel: "xmpp",
+      channelLabel: "XMPP",
+      cfg,
       accountId: account.accountId,
-      capability: CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY,
       context: { accountId: account.accountId },
-      abortSignal: opts.abortSignal,
     });
+    if (!nativeApprovalHandler) {
+      throw new Error("XMPP native approval capability did not create a handler");
+    }
+    await nativeApprovalHandler.start();
+    logger.info?.("native approval handler started");
   }
 
   let connection: XmppConnection | null = null;
@@ -381,6 +386,8 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       }
       telemetryLoop?.stop();
       telemetryLoop = null;
+      void nativeApprovalHandler?.stop();
+      nativeApprovalHandler = null;
       unregisterActiveXmppConnection(account.accountId);
       void connection?.stop();
       connection = null;

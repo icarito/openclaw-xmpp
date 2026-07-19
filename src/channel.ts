@@ -350,12 +350,13 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
               isConfigured: ({ cfg, accountId }) =>
                 isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId }),
               shouldHandle: ({ cfg, accountId, request }) => {
-                const account = resolveXmppAccount({ cfg: cfg as CoreConfig, accountId: accountId ?? undefined });
+                const turnSourceAccountId = String(request.request.turnSourceAccountId ?? "").trim();
+                const effectiveAccountId = turnSourceAccountId || accountId || undefined;
+                const account = resolveXmppAccount({ cfg: cfg as CoreConfig, accountId: effectiveAccountId });
                 if (!account.configured || (account.config.allowFrom ?? []).length === 0) return false;
-                if (!isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId })) return false;
+                if (!isXmppInlineButtonsEnabled({ cfg: cfg as CoreConfig, accountId: effectiveAccountId })) return false;
                 const turnSourceChannel = String(request.request.turnSourceChannel ?? "").trim().toLowerCase();
                 if (turnSourceChannel !== "xmpp") return false;
-                const turnSourceAccountId = String(request.request.turnSourceAccountId ?? "").trim();
                 return !turnSourceAccountId || turnSourceAccountId === account.accountId;
               },
               load: async () =>

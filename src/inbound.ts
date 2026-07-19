@@ -38,6 +38,7 @@ import { resolveXmppGroupMatch, resolveXmppGroupRequireMention } from "./policy.
 import { getXmppRuntime } from "./runtime.js";
 import { createXmppProgressController } from "./progress.js";
 import {
+  clearTypingXmpp,
   sendMessageXmpp,
   sendPayloadXmpp,
   sendPendingStatusXmpp,
@@ -570,4 +571,10 @@ export async function handleXmppInbound(params: {
   if (!deliveredVisibleReply) {
     await progress.finishWithoutReply();
   }
+  // A final reply may be delivered by editing the progress bubble. Unlike a
+  // normal send, that XEP-0308 path does not clear composing/presence itself.
+  await clearTypingXmpp(peerId, {
+    cfg: config,
+    accountId: account.accountId,
+  }).catch(() => {});
 }

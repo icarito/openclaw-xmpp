@@ -16,7 +16,7 @@ import {
 } from "openclaw/plugin-sdk/channel-outbound";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { markdownToPlain, XMPP_MAX_BODY } from "./protocol.js";
-import { sendEditXmpp, sendMessageXmpp } from "./send.js";
+import { sendEditXmpp, sendMessageXmpp, sendPayloadXmpp } from "./send.js";
 import type { CoreConfig } from "./types.js";
 
 // Una corrección XEP-0308 cada ~2.5s es visible como "en vivo" en cualquier
@@ -295,9 +295,29 @@ export function createXmppProgressController(params: {
     command?: string;
     reason?: string;
     message?: string;
+    approvalId?: string;
+    approvalSlug?: string;
   }) => {
     if (payload.phase !== "requested") {
       return;
+    }
+    const approvalId = payload.approvalId?.trim();
+    const approvalSlug = (payload.approvalSlug || approvalId)?.trim();
+    if (approvalId && approvalSlug) {
+      const command = payload.command?.trim() || payload.title?.trim() || "Comando";
+      const decisions = [
+        { label: "Allow Once", value: `/approve ${approvalId} allow-once`, style: "success" as const },
+        { label: "Allow Always", value: `/approve ${approvalId} allow-always`, style: "success" as const },
+        { label: "Deny", value: `/approve ${approvalId} deny`, style: "danger" as const },
+      ];
+      const text = `${command}\n\n🔒 ${command}\nResponde: /approve ${approvalSlug} allow-once | allow-always | deny`;
+      await sendPayloadXmpp(params.target, text, {
+        presentation: {
+          title: command,
+          blocks: [{ type: "buttons", buttons: decisions }],
+        },
+        channelData: { xmpp: { approval: {} } },
+      }, sendOpts);
     }
     await compositor.pushToolProgress(
       buildChannelProgressDraftLine({

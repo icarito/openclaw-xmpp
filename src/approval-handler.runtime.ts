@@ -40,6 +40,7 @@ type XmppPendingDelivery = {
   text: string;
   presentation?: Record<string, unknown>;
   channelData?: Record<string, unknown>;
+  accountId?: string;
 };
 
 type XmppFinalDelivery = {
@@ -48,11 +49,13 @@ type XmppFinalDelivery = {
 
 type XmppPreparedTarget = {
   to: string;
+  accountId?: string;
 };
 
 type XmppPendingEntry = {
   jid: string;
   stanzaId: string;
+  accountId?: string;
 };
 
 type XmppApprovalHandlerContext = {
@@ -82,11 +85,16 @@ function shouldHandleXmppApprovalRequest(params: {
   accountId?: string;
   request: ApprovalRequest;
 }): boolean {
-  if (!isXmppAccountConfiguredForApprovals(params)) return false;
   const turnSourceChannel = normalizeOptionalLowercaseString(params.request.request.turnSourceChannel);
-  if (turnSourceChannel !== "xmpp") return false;
   const turnSourceAccountId = normalizeOptionalString(params.request.request.turnSourceAccountId);
-  const resolvedAccount = resolveXmppAccount({ cfg: params.cfg, accountId: params.accountId });
+  const effective = { ...params, accountId: turnSourceAccountId || params.accountId };
+  if (!isXmppAccountConfiguredForApprovals(effective)) return false;
+  const resolvedAccount = resolveXmppAccount({ cfg: params.cfg, accountId: effective.accountId });
+  if (turnSourceChannel && turnSourceChannel !== "xmpp") return false;
+  if (!turnSourceChannel) {
+    const sessionKey = normalizeOptionalString(params.request.request.sessionKey);
+    if (!sessionKey?.startsWith(`agent:${resolvedAccount.accountId}:`)) return false;
+  }
   // No explicit turnSourceAccountId on the request: fall back to matching the
   // default/resolved account, same as a request with no account scoping.
   if (!turnSourceAccountId) return true;
@@ -99,6 +107,7 @@ function buildXmppPendingPayload(params: {
   nowMs: number;
   view: PendingApprovalView;
 }): XmppPendingDelivery {
+  const accountId = normalizeOptionalString(params.request.request.turnSourceAccountId);
   if (params.approvalKind === "plugin") {
     const payload = buildPluginApprovalPendingReplyPayload({
       request: params.request as PluginApprovalRequest,
@@ -108,6 +117,7 @@ function buildXmppPendingPayload(params: {
       text: payload.text ?? "",
       presentation: payload.presentation as Record<string, unknown> | undefined,
       channelData: payload.channelData,
+      ...(accountId ? { accountId } : {}),
     };
   }
   const request = params.request as ExecApprovalRequest;
@@ -130,6 +140,7 @@ function buildXmppPendingPayload(params: {
     text: payload.text ?? "",
     presentation: payload.presentation as Record<string, unknown> | undefined,
     channelData: payload.channelData,
+    ...(accountId ? { accountId } : {}),
   };
 }
 
@@ -154,6 +165,28 @@ async function loadXmppSendRuntime() {
   // pattern -- keeps the connection/protocol modules out of the cold-start path.
   return await import("./channel-runtime.js");
 }
+
+export const xmppApprovalNativeAdapter = {
+  describeDeliveryCapabilities: ({ cfg, accountId }: { cfg: CoreConfig; accountId?: string | null }) => {
+    const enabled = isXmppAccountConfiguredForApprovals({
+      cfg,
+      accountId: accountId ?? undefined,
+    });
+    return {
+      enabled,
+      preferredSurface: "origin" as const,
+      supportsOriginSurface: enabled,
+      supportsApproverDmSurface: false,
+    };
+  },
+  resolveOriginTarget: ({ request }: { request: ApprovalRequest }) => {
+    const raw = normalizeOptionalString(request.request.turnSourceTo);
+    if (!raw) return null;
+    const to = raw.replace(/^xmpp:/i, "").trim();
+    const accountId = normalizeOptionalString(request.request.turnSourceAccountId);
+    return to ? { to, ...(accountId ? { accountId } : {}) } : null;
+  },
+};
 
 export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapter<
   XmppPendingDelivery,
@@ -196,9 +229,16 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
   transport: {
     prepareTarget: ({ plannedTarget }) => ({
       dedupeKey: buildChannelApprovalNativeTargetKey(plannedTarget.target),
-      target: { to: plannedTarget.target.to },
+      // accountId viaja en el planned target en runtime aunque el tipo del SDK
+      // (ChannelApprovalNativeTarget) no lo declare todavía.
+      target: {
+        to: plannedTarget.target.to,
+        accountId: (plannedTarget.target as { to: string; accountId?: string }).accountId,
+      },
     }),
     deliverPending: async ({ cfg, accountId, preparedTarget, pendingPayload }) => {
+      const deliveryAccountId = pendingPayload.accountId || preparedTarget.accountId || accountId;
+      log.info(`xmpp approvals: delivering pending card to=${preparedTarget.to} account=${deliveryAccountId ?? "default"}`);
       const { sendPayloadXmpp } = await loadXmppSendRuntime();
       const result = await sendPayloadXmpp(
         preparedTarget.to,
@@ -212,19 +252,21 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
         },
         {
           cfg: cfg as CoreConfig,
-          accountId,
+          accountId: deliveryAccountId,
         },
       );
       return {
         jid: result.target,
         stanzaId: result.messageId,
+        accountId: deliveryAccountId,
       };
     },
     updateEntry: async ({ cfg, accountId, entry, payload }) => {
+      log.info(`xmpp approvals: updating card stanza=${entry.stanzaId}`);
       const { sendEditXmpp } = await loadXmppSendRuntime();
       await sendEditXmpp(entry.jid, payload.text, entry.stanzaId, {
         cfg: cfg as CoreConfig,
-        accountId,
+        accountId: entry.accountId || accountId,
       });
     },
   },
