@@ -112,6 +112,37 @@ export async function tryResolveXmppApprovalCommand(params: {
  */
 const EXPOSED_NATIVE_COMMAND_KEYS = ["context", "compact", "reset", "new", "model"];
 
+export function buildAbortAction(params: {
+  account: ResolvedXmppAccount;
+  cfg: CoreConfig;
+  runtime: RuntimeEnv;
+}): XmppAction[] {
+  const { account, cfg, runtime } = params;
+  return [
+    {
+      node: "abort",
+      name: "Session: abort",
+      description: "Cancela el turno activo del agente (útil si una aprobación bloquea la conversación).",
+      params: [],
+      mutating: true,
+      handler: async (_formParams, ctx?: ActionContext) => {
+        if (!ctx?.fromJid) return "Cannot run this command: no requesting JID available.";
+        const commandText = "/abort";
+        dispatchNativeCommandText({
+          commandText,
+          fromJid: ctx.fromJid,
+          account,
+          cfg,
+          runtime,
+        }).catch((err) => {
+          runtime.error?.(`xmpp native command "abort" dispatch failed: ${String(err)}`);
+        });
+        return "Abort submitted. El turno será cancelado si hay uno activo.";
+      },
+    },
+  ];
+}
+
 /**
  * Build one XmppAction per exposed native command, keyed by the registry's
  * own `key` (not renamed) so the node in disco#items and the slash text
@@ -212,6 +243,12 @@ export async function dispatchNativeCommandText(params: {
   const { commandText, fromJid, account, cfg, runtime } = params;
 
   if (await tryResolveXmppApprovalCommand({ commandText, fromJid, account, cfg })) {
+    return;
+  }
+
+  // /abort is also control-plane: no debe pasar al agente que posiblemente
+  // está bloqueado esperando una aprobación.
+  if (/^\/abort\s*$/i.test(commandText.trim())) {
     return;
   }
 

@@ -34,6 +34,33 @@ import type { CoreConfig } from "./types.js";
 
 const log = createSubsystemLogger("xmpp/approvals");
 
+const repromptTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelRepromptByApprovalId(approvalId: string): void {
+  const timer = repromptTimers.get(approvalId);
+  if (timer) {
+    clearTimeout(timer);
+    repromptTimers.delete(approvalId);
+  }
+}
+
+/** Una sola aprobación pendiente por sesión. Ver incidente 2026-07-19:
+ *  2 exec calls paralelos del mismo turno → 2 approvals → el manager
+ *  upstream pierde la segunda → Promise huérfana → turno bloqueado.
+ *  Prevenimos en origen: la segunda approval se rechaza a nivel plugin
+ *  y el core devuelve un error al agente. */
+const activeSessionApprovals = new Set<string>();
+
+function trackApproval(sessionKey: string): boolean {
+  if (activeSessionApprovals.has(sessionKey)) return false;
+  activeSessionApprovals.add(sessionKey);
+  return true;
+}
+
+function untrackApproval(sessionKey: string): void {
+  activeSessionApprovals.delete(sessionKey);
+}
+
 type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
 
 type XmppPendingDelivery = {
@@ -56,6 +83,7 @@ type XmppPendingEntry = {
   jid: string;
   stanzaId: string;
   accountId?: string;
+  sessionKey?: string;
 };
 
 type XmppApprovalHandlerContext = {
@@ -100,11 +128,9 @@ function shouldHandleXmppApprovalRequest(params: {
   }
   if (turnSourceChannel && turnSourceChannel !== "xmpp") return false;
   if (turnSourceAccountId) return turnSourceAccountId === handlerAccount.accountId;
-  // Sin turnSourceAccountId: desempate único por prefijo de sessionKey
-  // (agentId == accountId en esta flota). Nunca reclamar sin ancla, o
-  // vuelven los duplicados.
   const sessionKey = normalizeOptionalString(params.request.request.sessionKey);
-  return sessionKey?.startsWith(`agent:${handlerAccount.accountId}:`) === true;
+  if (!sessionKey?.startsWith(`agent:${handlerAccount.accountId}:`)) return false;
+  return trackApproval(sessionKey);
 }
 
 function buildXmppPendingPayload(params: {
@@ -242,7 +268,7 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
         accountId: (plannedTarget.target as { to: string; accountId?: string }).accountId,
       },
     }),
-    deliverPending: async ({ cfg, accountId, preparedTarget, pendingPayload }) => {
+    deliverPending: async ({ cfg, accountId, preparedTarget, pendingPayload, request, view }) => {
       const deliveryAccountId = pendingPayload.accountId || preparedTarget.accountId || accountId;
       log.info(`xmpp approvals: delivering pending card to=${preparedTarget.to} account=${deliveryAccountId ?? "default"}`);
       const { sendPayloadXmpp } = await loadXmppSendRuntime();
@@ -261,14 +287,43 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
           accountId: deliveryAccountId,
         },
       );
+
+      // Re-prompt a los 2/3 del tiempo de expiración: si el usuario no ha
+      // respondido, se manda un recordatorio para que no expire sin verlo.
+      const expiresAtMs = request.expiresAtMs;
+      if (expiresAtMs && expiresAtMs > Date.now()) {
+        const remaining = expiresAtMs - Date.now();
+        const repromptDelay = Math.max(30_000, Math.floor(remaining / 3));
+        const stanzaKey = result.messageId;
+        const timer = setTimeout(async () => {
+          repromptTimers.delete(stanzaKey);
+          try {
+            const mins = Math.ceil(remaining / 60_000);
+            const { sendPayloadXmpp: sendRepromptPayload } = await loadXmppSendRuntime();
+            await sendRepromptPayload(
+              preparedTarget.to,
+              `⏳ Recordatorio: tienes una aprobación pendiente desde hace ${mins} min. Responde con /approve ${request.id.slice(0, 8)} <allow-once|allow-always|deny> o /abort para cancelarla. Expira pronto.`,
+              { text: "" },
+              { cfg: cfg as CoreConfig, accountId: deliveryAccountId },
+            );
+          } catch (err) {
+            log.warn(`xmpp approvals: reprompt delivery failed: ${String(err)}`);
+          }
+        }, repromptDelay);
+        repromptTimers.set(stanzaKey, timer);
+      }
+
       return {
         jid: result.target,
         stanzaId: result.messageId,
         accountId: deliveryAccountId,
+        sessionKey: normalizeOptionalString(request.request.sessionKey),
       };
     },
     updateEntry: async ({ cfg, accountId, entry, payload }) => {
       log.info(`xmpp approvals: updating card stanza=${entry.stanzaId}`);
+      cancelRepromptByApprovalId(entry.stanzaId);
+      if (entry.sessionKey) untrackApproval(entry.sessionKey);
       const { sendEditXmpp } = await loadXmppSendRuntime();
       await sendEditXmpp(entry.jid, payload.text, entry.stanzaId, {
         cfg: cfg as CoreConfig,
@@ -279,6 +334,8 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
   observe: {
     onDeliveryError: ({ error, request }) => {
       log.error(`xmpp approvals: failed to deliver request ${request.id}: ${String(error)}`);
+      const sessionKey = normalizeOptionalString(request.request.sessionKey);
+      if (sessionKey) untrackApproval(sessionKey);
     },
   },
 });

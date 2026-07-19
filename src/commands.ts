@@ -37,7 +37,7 @@ import { buildModelsProviderData } from "openclaw/plugin-sdk/models-provider-run
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { buildApprovalModeAction } from "./approval-mode.js";
 import { createActionDispatcher, type XmppAction } from "./actions.js";
-import { buildNativeCommandActions, dispatchNativeCommandText, tryResolveXmppApprovalCommand } from "./native-commands.js";
+import { buildAbortAction, buildNativeCommandActions, dispatchNativeCommandText, tryResolveXmppApprovalCommand } from "./native-commands.js";
 import { Xep0050Handler } from "./xep-0050.js";
 import { TextualFallback } from "./textual-fallback.js";
 import { buildCorrectionStanza, buildQueryCommandStanza, buildQuickResponseStanza, resolveInlineButtonsScope } from "./outbound-render.js";
@@ -120,6 +120,7 @@ function buildAccountActions(params: {
     // into OpenClaw's real native command registry, the same one Telegram
     // uses for its slash commands.
     ...buildNativeCommandActions({ account, cfg, runtime }),
+    ...buildAbortAction({ account, cfg, runtime }),
     buildApprovalModeAction({ account, cfg }),
   ];
 }
@@ -296,9 +297,9 @@ export function registerXmppCommands(params: {
   const handleMessage = (jid: string, body: string, _stanza?: Element): boolean => {
     if (isResetOrClearCommandText(body)) clearPending();
 
-    // Approval decisions are control-plane traffic. They must never enter
-    // the per-session agent queue because that queue is occupied by the exec
-    // call waiting for this very decision.
+    // Approval decisions and abort are control-plane traffic. They must
+    // never enter the per-session agent queue because that queue is occupied
+    // by the exec call waiting for this very decision.
     if (/^\/approve\s+/i.test(body.trim())) {
       tryResolveXmppApprovalCommand({
         commandText: body,
@@ -307,6 +308,19 @@ export function registerXmppCommands(params: {
         cfg,
       }).catch((err) => {
         runtime.error?.(`xmpp approval command failed: ${String(err)}`);
+      });
+      return true;
+    }
+
+    if (/^\/abort\s*$/i.test(body.trim())) {
+      dispatchNativeCommandText({
+        commandText: body,
+        fromJid: jid,
+        account,
+        cfg,
+        runtime,
+      }).catch((err) => {
+        runtime.error?.(`xmpp abort command failed: ${String(err)}`);
       });
       return true;
     }
