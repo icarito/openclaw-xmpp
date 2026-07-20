@@ -246,18 +246,33 @@ export async function dispatchNativeCommandText(params: {
     return;
   }
 
-  // /abort is also control-plane: no debe pasar al agente que posiblemente
-  // está bloqueado esperando una aprobación.
-  if (/^\/abort\s*$/i.test(commandText.trim())) {
-    return;
-  }
+  // /abort SÍ debe llegar al core (a diferencia de /approve, que el plugin
+  // resuelve por su cuenta): es la única señal real de cancelación de turno.
+  // Hasta 2026-07-20 esto hacía `return` aquí mismo con el comentario "no debe
+  // pasar al agente que posiblemente está bloqueado esperando una aprobación"
+  // — la intención (no tratarlo como texto conversacional a interpretar) era
+  // correcta, pero la implementación descartaba la señal en vez de reenviarla
+  // por una vía que el core reconoce, dejando el turno corriendo pese al
+  // "Abort submitted" que veía el usuario (ver buildAbortAction más abajo).
+  //
+  // El core reconoce la cancelación en isAbortRequestText
+  // (abort-primitives.ts, interno del paquete openclaw, no exportado por
+  // plugin-sdk): acepta el literal "/stop" o una palabra suelta del set
+  // ABORT_TRIGGERS ("abort", "stop", "detente", ...), NINGUNA con barra
+  // inicial salvo "/stop". El "/abort" que este plugin inventa localmente no
+  // matchea ninguna de las dos formas, así que se reescribe a "/stop" antes
+  // de reenviar — msg.text es lo único que le llega al detector, no hay razón
+  // para preservar la ortografía original del comando XMPP.
+  const forwardedText = /^\/abort\s*$/i.test(commandText.trim())
+    ? "/stop"
+    : commandText;
 
   const message: XmppInboundMessage = {
     messageId: makeXmppMessageId(),
     target: fromJid,
     rawFrom: fromJid,
     senderJid: fromJid,
-    text: commandText,
+    text: forwardedText,
     timestamp: Date.now(),
     isGroup: false,
     // Explicit ad-hoc command invocation via an authenticated IQ from this
