@@ -410,6 +410,35 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
         log.warn(
           `xmpp approvals: sesión ${guardSessionKey} ya tiene una aprobación en vuelo; se omite la segunda`,
         );
+        // Antes este rechazo era silencioso para el usuario: onDeliveryError
+        // ve isGuardRejection y no hace nada (a propósito, para no liberar la
+        // ranura que sigue ocupada por la aprobación en vuelo), así que ni
+        // card ni texto llegaban al chat — solo un log. La única esperanza de
+        // que el usuario se enterara era que el agente narrara el toolResult
+        // de la llamada exec rechazada, algo que no está garantizado y que
+        // verificamos que upstream (2026.7.1) también delega al agente en su
+        // propio guard equivalente (ver sessionApprovalMergeKey en
+        // exec-approval). Se manda un aviso directo, igual que el reprompt de
+        // abajo, para no depender de esa narración.
+        const blocking = activeSessionApprovals.get(guardSessionKey);
+        try {
+          const { sendPayloadXmpp: sendGuardNotice } = await loadXmppSendRuntime();
+          const suffix = blocking?.approvalId
+            ? ` (${blocking.approvalId.slice(0, 8)})`
+            : "";
+          await sendGuardNotice(
+            preparedTarget.to,
+            `⏳ Ya hay una aprobación pendiente para esta sesión${suffix}. `
+              + `Resuelve esa antes de que se pueda pedir la siguiente.`,
+            { text: "" },
+            { cfg: cfg as CoreConfig, accountId: preparedTarget.accountId || accountId },
+          );
+        } catch (err) {
+          // No perder el rechazo original por un fallo al avisar: se loguea
+          // aparte y se sigue con el throw de abajo, que es lo que de verdad
+          // libera al agente para reintentar más tarde.
+          log.warn(`xmpp approvals: no se pudo avisar el rechazo por guard: ${String(err)}`);
+        }
         throw new XmppApprovalGuardRejection(
           `xmpp approvals: aprobación concurrente rechazada para ${guardSessionKey}`,
         );
