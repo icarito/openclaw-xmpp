@@ -25,7 +25,7 @@ import { getXmppRuntime } from "./runtime.js";
 import { getActiveXmppConnection } from "./connection-registry.js";
 import { uploadFileXmpp } from "./upload.js";
 import { buildQuickResponseStanza, resolveInlineButtonsScope, type XmppInlineButtonsScope } from "./outbound-render.js";
-import { registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
+import { DEFAULT_TTL_MS, registerXmppCommandNode, registerXmppCommandResponse } from "./command-node-registry.js";
 import {
   getXmppAccountActivity,
   markXmppMessagePending,
@@ -483,9 +483,10 @@ export async function sendPayloadXmpp(
 
   const id = nextStanzaId();
   const approvalData = xmppData?.approval as Record<string, unknown> | undefined;
-  const expiresAtMs = typeof approvalData?.expiresAtMs === "number" ? approvalData.expiresAtMs : undefined;
-  const responseTtlMs = expiresAtMs !== undefined ? Math.max(0, expiresAtMs - Date.now()) : undefined;
-  const ttlOptions = responseTtlMs !== undefined ? { ttlMs: responseTtlMs } : {};
+  const explicitExpiresAtMs = typeof approvalData?.expiresAtMs === "number" ? approvalData.expiresAtMs : undefined;
+  const expiresAtMs = explicitExpiresAtMs ?? Date.now() + DEFAULT_TTL_MS;
+  const responseTtlMs = Math.max(0, expiresAtMs - Date.now());
+  const ttlOptions = { ttlMs: responseTtlMs };
   const commandItems = controls.map((control, index) => {
     const node = `cmd:${id}:${index}`;
     registerXmppCommandNode({
@@ -514,7 +515,7 @@ export async function sendPayloadXmpp(
       target,
       type,
       id,
-      { ...(expiresAtMs !== undefined ? { expiresAtMs } : {}), commandItems },
+      { expiresAtMs, commandItems },
     ),
   );
   recordXmppOutboundActivity(account.accountId);

@@ -5,7 +5,7 @@ type CommandNodeEntry = {
 
 const REGISTRY_KEY = Symbol.for("openclaw.xmpp.commandNodes");
 const RESPONSE_REGISTRY_KEY = Symbol.for("openclaw.xmpp.commandResponses");
-const DEFAULT_TTL_MS = 15 * 60 * 1000;
+export const DEFAULT_TTL_MS = 15 * 60 * 1000;
 
 function getRegistry(): Map<string, CommandNodeEntry> {
   const g = globalThis as Record<symbol, unknown>;
