@@ -10,6 +10,7 @@ import { createChannelApprovalHandlerFromCapability } from "openclaw/plugin-sdk/
 import type { ChannelApprovalHandler } from "openclaw/plugin-sdk/approval-handler-runtime";
 import type { ChannelRuntimeSurface } from "openclaw/plugin-sdk/channel-contract";
 import { resolveXmppAccount } from "./accounts.js";
+import { clearXmppAccountActivity } from "./activity-registry.js";
 import {
   xmppApprovalNativeAdapter,
   xmppApprovalNativeRuntime,
@@ -242,6 +243,30 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
         telemetryLoop?.stop();
         telemetryLoop = startTelemetryLoop({ account, cfg, connection: onlineConnection, logger });
         logger.info(`[${account.accountId}] connected as ${jid}`);
+        // Un turno que muere entre setTyping y clearTyping (rebound de sesión,
+        // kill -9, restart del proceso) deja una presencia dnd/processing
+        // dirigida (buildStatusPresence con `to=<peer>`) que el cliente del
+        // contacto sigue mostrando: el timer de expiración de
+        // activity-registry (90s) es la red de seguridad normal, pero vive en
+        // memoria del proceso y se pierde con él, igual que con cualquier
+        // restart — nada vuelve a corregir esa presencia dirigida después.
+        // clearXmppAccountActivity ya sabe hacer esto (dispara el mismo
+        // expiryHandler que usa el TTL normal, que re-emite "available" hacia
+        // el último target conocido) — solo faltaba llamarlo aquí, en la
+        // única otra transición que puede dejar un turno a medias sin que
+        // ningún timer sobreviva para corregirlo. Sin embargo esto NO cubre
+        // el caso en que el registro en memoria también se perdió con el
+        // proceso (ya no hay "target" que recordar) — por eso además se
+        // manda una <presence/> SIN `to` (no dirigida): es el anuncio
+        // estándar "disponible" hacia todo el roster, y sobrescribe
+        // cualquier presencia dirigida vieja para cualquier peer, se sepa
+        // cuál era o no.
+        clearXmppAccountActivity(account.accountId);
+        try {
+          await onlineConnection.send(xml("presence", {}));
+        } catch {
+          // best-effort, igual que el resto de los emisores de presencia.
+        }
       },
       onOffline: () => {
         unregisterActiveXmppConnection(account.accountId);
