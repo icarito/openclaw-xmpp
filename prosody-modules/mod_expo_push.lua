@@ -8,7 +8,7 @@ local st = require "util.stanza";
 
 local service_jid = module:get_option_string("expo_push_service_jid", "expo-push." .. module.host);
 local endpoint = module:get_option_string("expo_push_endpoint", "https://exp.host/--/api/v2/push/send");
-local default_title = module:get_option_string("expo_push_title", "Nuevo mensaje XMPP");
+local default_title = module:get_option_string("expo_push_title", "Nuevo mensaje");
 local default_body = module:get_option_string("expo_push_body", "Tienes un mensaje nuevo");
 local channel_id = module:get_option_string("expo_push_channel_id", "xmpp_messages");
 -- Ventana de agrupamiento: varios pushes consecutivos del mismo remitente
