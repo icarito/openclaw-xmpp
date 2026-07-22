@@ -28,6 +28,7 @@ import {
   clearAllRoomStates,
   getOccupantStats,
   getOccupantRealJid,
+  isTrackedMucJid,
 } from "./muc-occupants.js";
 
 // =============================================================================
@@ -61,6 +62,7 @@ export {
   clearAllRoomStates,
   getOccupantStats,
   getOccupantRealJid,
+  isTrackedMucJid,
 } from "./muc-occupants.js";
 export type { MucOccupant, RoomAnonymity } from "./muc-occupants.js";
 

@@ -7,6 +7,7 @@
 import { xml } from "@xmpp/client";
 import type { Element } from "@xmpp/xml";
 import { pepPublish, pepFetch } from "../pep.js";
+import { isTrackedMucJid } from "./muc-occupants.js";
 import type { Logger } from "./types.js";
 import { NS_OMEMO, NS_OMEMO_DEVICES, NS_OMEMO_V2, NS_OMEMO_DEVICES_V2, type OmemoProtocol } from "./types.js";
 
@@ -105,6 +106,12 @@ export async function fetchDeviceList(
   jid: string,
   log?: Logger
 ): Promise<Array<{ id: number; label?: string }>> {
+  // PEP device lists belong to a user's bare JID, never to a MUC service.
+  // Refuse unresolved room JIDs instead of generating an item-not-found IQ.
+  if (jid && isTrackedMucJid(accountId, jid)) {
+    log?.warn?.(`[${accountId}] OMEMO refusing device-list lookup for bare MUC ${jid}; resolve occupant real JID first`);
+    return [];
+  }
   try {
     // Read OMEMO 2 first, then legacy for dual-stack interoperability.
     let result = await pepFetch(accountId, jid || undefined as unknown as string, NS_OMEMO_DEVICES_V2, undefined, log);

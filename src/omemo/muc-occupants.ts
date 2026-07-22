@@ -205,8 +205,16 @@ export function handleMucPresence(
   // Extract real JID if provided (non-anonymous rooms)
   const realJidAttr = item.attrs.jid as string | undefined;
   if (realJidAttr) {
-    occupant.realJid = bareJid(realJidAttr);
-    log?.debug?.(`[${accountId}] Occupant ${nick} in ${roomJid}: realJid=${occupant.realJid}`);
+    const candidate = bareJid(realJidAttr);
+    // A MUC service may omit the real JID (or, on broken/non-anonymous
+    // responses, echo the room JID). Never retain the room as a PEP target:
+    // querying OMEMO nodes on a bare MUC produces item-not-found errors.
+    if (candidate && candidate !== bareJid(roomJid) && candidate.includes("@")) {
+      occupant.realJid = candidate;
+      log?.debug?.(`[${accountId}] Occupant ${nick} in ${roomJid}: realJid=${candidate}`);
+    } else {
+      log?.debug?.(`[${accountId}] Ignoring invalid MUC real JID for ${roomJid}/${nick}: ${realJidAttr}`);
+    }
   }
 
   room.occupants.set(nick, occupant);
@@ -248,7 +256,7 @@ export function getRoomOccupantJids(
 
   const jids: string[] = [];
   for (const occupant of room.occupants.values()) {
-    if (!occupant.realJid) continue;
+    if (!occupant.realJid || occupant.realJid === room.roomJid) continue;
 
     // Optionally exclude self
     if (excludeSelf && occupant.nick === room.selfNick) continue;
@@ -308,7 +316,17 @@ export function getOccupantRealJid(
   const occupant = room.occupants.get(nick);
   if (!occupant) return null;
 
-  return occupant.realJid ?? null;
+  if (!occupant.realJid || occupant.realJid === room.roomJid) return null;
+  return occupant.realJid;
+}
+
+/**
+ * Return true when a JID is a tracked room rather than a real occupant.
+ * Callers fetching PEP data should never use a bare MUC JID as a service.
+ */
+export function isTrackedMucJid(accountId: string, jid: string): boolean {
+  const normalized = bareJid(jid);
+  return roomStates.has(roomKey(accountId, normalized));
 }
 
 // =============================================================================

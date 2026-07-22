@@ -7,6 +7,7 @@
 import { xml } from "@xmpp/client";
 import type { Element } from "@xmpp/xml";
 import { pepPublish, pepFetch } from "../pep.js";
+import { isTrackedMucJid } from "./muc-occupants.js";
 import type { Logger, OmemoBundle } from "./types.js";
 import { toBase64, fromBase64, getElementText } from "../xml-utils.js";
 import { NS_OMEMO, NS_OMEMO_BUNDLES, NS_OMEMO_V2, NS_OMEMO_BUNDLES_V2, type OmemoProtocol } from "./types.js";
@@ -89,6 +90,10 @@ export async function fetchBundle(
   deviceId: number,
   log?: Logger
 ): Promise<OmemoBundle | null> {
+  if (jid && isTrackedMucJid(accountId, jid)) {
+    log?.warn?.(`[${accountId}] OMEMO refusing bundle lookup for bare MUC ${jid}; resolve occupant real JID first`);
+    return null;
+  }
   try {
     const v2Node = `${NS_OMEMO_BUNDLES_V2}:${deviceId}`;
     let result = await pepFetch(accountId, jid, v2Node, undefined, log);
