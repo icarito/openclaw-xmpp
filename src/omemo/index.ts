@@ -1208,6 +1208,13 @@ export function buildOmemoMessageStanza(
   msgType: "chat" | "groupchat" = "chat"
 ): Element {
   const messageId = `omemo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  // Parsed sidecar elements can carry their namespace in ltx's namespace
+  // context rather than as a literal `attrs.xmlns`.  Falling back to the
+  // legacy namespace made genuine OMEMO 2 stanzas advertise a contradictory
+  // EME hint, which causes clients such as Gajim to classify them wrongly.
+  const encryptionNamespace = encryptedElement.getNS?.()
+    ?? encryptedElement.attrs?.xmlns
+    ?? NS_OMEMO;
 
   return xml(
     "message",
@@ -1216,7 +1223,7 @@ export function buildOmemoMessageStanza(
     // EME (Encryption for Message Encryption) hint
     xml("encryption", {
       xmlns: "urn:xmpp:eme:0",
-      namespace: encryptedElement.attrs?.xmlns ?? NS_OMEMO,
+      namespace: encryptionNamespace,
       name: "OMEMO",
     }),
     // Store hint for MAM
