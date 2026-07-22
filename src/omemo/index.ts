@@ -661,14 +661,17 @@ export async function encryptOmemoMessage(
 
   try {
     // Fetch recipient's devices (uses cache if available)
-    const devices = await getDeviceList(accountId, recipientJid, false, log);
+    // OMEMO 2 clients may publish a fresh device immediately before the
+    // first message; avoid encrypting against a stale cached device list.
+    const refreshDevices = getOmemoProtocol(accountId) === "v2";
+    const devices = await getDeviceList(accountId, recipientJid, refreshDevices, log);
     if (devices.length === 0) {
       log?.warn?.(`[${accountId}] No OMEMO devices for ${recipientJid}`);
       return null;
     }
 
     // Also include our own devices (except current one) for multi-device sync
-    const ownDevices = await getDeviceList(accountId, "", false, log);
+    const ownDevices = await getDeviceList(accountId, "", refreshDevices, log);
     const ourDeviceId = store.getDeviceId();
     const otherOwnDevices = ownDevices.filter(d => d.id !== ourDeviceId);
 
@@ -816,8 +819,9 @@ export async function encryptMucOmemoMessage(
     // Collect all devices from all occupants
     const allDevices: Array<{ jid: string; deviceId: number }> = [];
 
+    const refreshDevices = getOmemoProtocol(accountId) === "v2";
     for (const jid of occupantJids) {
-      const devices = await getDeviceList(accountId, jid, false, log);
+      const devices = await getDeviceList(accountId, jid, refreshDevices, log);
       for (const device of devices) {
         allDevices.push({ jid, deviceId: device.id });
       }
@@ -831,7 +835,7 @@ export async function encryptMucOmemoMessage(
     // Also include our own devices for multi-device sync
     // Unlike DMs, MUC messages are reflected back by the server, so we MUST
     // encrypt for our own device(s) to read the reflected message
-    const ownDevices = await getDeviceList(accountId, "", false, log);
+    const ownDevices = await getDeviceList(accountId, "", refreshDevices, log);
     const ourDeviceId = store.getDeviceId();
     // For MUC, include ALL own devices including current one (for reflected messages)
     const ownDevicesToEncrypt = ownDevices;
