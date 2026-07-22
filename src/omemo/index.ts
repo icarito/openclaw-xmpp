@@ -119,9 +119,15 @@ export async function initializeOmemo(
     const data = store.exportData();
     saveOmemoStoreData(accountId, data, log);
 
-    // Publish device ID
-    // If fresh start, replace entire device list to clear stale device IDs
-    await publishDeviceId(accountId, store.getDeviceId(), deviceLabel, log, isFreshStart, protocol);
+    // Publish device ID. In dual mode use the same Signal identity/device in
+    // both PEP namespaces so OMEMO 1 clients (Gajim) and OMEMO 2 clients
+    // (Dino, etc.) can discover us. Each namespace has its own device list.
+    const publishProtocols: OmemoProtocol[] = protocol === "dual" ? ["legacy", "v2"] : [protocol];
+    for (const publishProtocol of publishProtocols) {
+      // If fresh, replace each namespace independently; otherwise merge with
+      // the existing list in that namespace.
+      await publishDeviceId(accountId, store.getDeviceId(), deviceLabel, log, isFreshStart, publishProtocol);
+    }
 
     // Publish key bundle
     const signedPreKey = store.getSignedPreKey();
@@ -136,7 +142,9 @@ export async function initializeOmemo(
         },
         store.getPreKeys()
       );
-      await publishBundle(accountId, store.getDeviceId(), bundle, log, protocol);
+      for (const publishProtocol of publishProtocols) {
+        await publishBundle(accountId, store.getDeviceId(), bundle, log, publishProtocol);
+      }
     }
 
     // Track store

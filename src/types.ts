@@ -71,7 +71,8 @@ export type XmppAccountConfig = {
     enabled?: boolean;
     deviceLabel?: string;
     /** Protocol namespace used for publication/envelopes (defaults to legacy). */
-    protocol?: "legacy" | "v2";
+    /** Use `dual` to publish the same device and bundle in both OMEMO namespaces. */
+    protocol?: "legacy" | "v2" | "dual";
     /** Refuse plaintext when OMEMO cannot encrypt a message. */
     requireEncryption?: boolean;
   };
