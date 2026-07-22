@@ -104,7 +104,8 @@ async function fetchOwnDeviceList(
 export async function fetchDeviceList(
   accountId: string,
   jid: string,
-  log?: Logger
+  log?: Logger,
+  protocol?: OmemoProtocol
 ): Promise<Array<{ id: number; label?: string }>> {
   // PEP device lists belong to a user's bare JID, never to a MUC service.
   // Refuse unresolved room JIDs instead of generating an item-not-found IQ.
@@ -113,9 +114,10 @@ export async function fetchDeviceList(
     return [];
   }
   try {
-    // Read OMEMO 2 first, then legacy for dual-stack interoperability.
-    let result = await pepFetch(accountId, jid || undefined as unknown as string, NS_OMEMO_DEVICES_V2, undefined, log);
-    if (!result.ok || !result.data?.length) {
+    const node = protocol === "legacy" ? NS_OMEMO_DEVICES : NS_OMEMO_DEVICES_V2;
+    // With no protocol requested retain historical v2-first fallback behavior.
+    let result = await pepFetch(accountId, jid || undefined as unknown as string, node, undefined, log);
+    if (!protocol && (!result.ok || !result.data?.length)) {
       result = await pepFetch(accountId, jid || undefined as unknown as string, NS_OMEMO_DEVICES, undefined, log);
     }
 

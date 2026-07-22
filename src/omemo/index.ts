@@ -671,21 +671,30 @@ export async function encryptOmemoMessage(
     // Fetch recipient's devices (uses cache if available)
     // OMEMO 2 clients may publish a fresh device immediately before the
     // first message; avoid encrypting against a stale cached device list.
-    const refreshDevices = getOmemoProtocol(accountId) === "v2";
-    const devices = await getDeviceList(accountId, recipientJid, refreshDevices, log);
+    const configuredProtocol = getOmemoProtocol(accountId);
+    const refreshDevices = configuredProtocol !== "legacy";
+    let selectedProtocol: OmemoProtocol = configuredProtocol === "dual" ? "legacy" : configuredProtocol;
+    let devices = await getDeviceList(accountId, recipientJid, refreshDevices, log);
+    if (configuredProtocol === "dual") {
+      const v2Devices = await fetchDeviceList(accountId, recipientJid, log, "v2");
+      if (v2Devices.length > 0) { selectedProtocol = "v2"; devices = v2Devices; }
+      else devices = await fetchDeviceList(accountId, recipientJid, log, "legacy");
+    }
     if (devices.length === 0) {
       log?.warn?.(`[${accountId}] No OMEMO devices for ${recipientJid}`);
       return null;
     }
 
     // Also include our own devices (except current one) for multi-device sync
-    const ownDevices = await getDeviceList(accountId, "", refreshDevices, log);
+    const ownDevices = configuredProtocol === "dual"
+      ? await fetchDeviceList(accountId, "", log, selectedProtocol)
+      : await getDeviceList(accountId, "", refreshDevices, log);
     const ourDeviceId = store.getDeviceId();
     const otherOwnDevices = ownDevices.filter(d => d.id !== ourDeviceId);
 
     log?.debug?.(`[${accountId}] OMEMO multi-device: ${devices.length} recipient devices, ${otherOwnDevices.length} own other devices`);
 
-    const isV2 = getOmemoProtocol(accountId) === "v2";
+    const isV2 = selectedProtocol === "v2";
     const payloadPlaintext = isV2 ? buildSceEnvelope(plaintext, recipientJid) : plaintext;
     const v2Payload = isV2 ? encryptV2Payload(new TextEncoder().encode(payloadPlaintext)) : null;
     // Legacy OMEMO uses a 16-byte AES-GCM key plus its 16-byte tag.
@@ -714,7 +723,8 @@ export async function encryptOmemoMessage(
           recipientJid,
           device.id,
           messageKey,
-          log
+          log,
+          selectedProtocol
         );
         if (result) {
           keyElements.push(
@@ -740,7 +750,8 @@ export async function encryptOmemoMessage(
           "", // Self
           device.id,
           messageKey,
-          log
+          log,
+          selectedProtocol
         );
         if (result) {
           keyElements.push(
@@ -956,7 +967,8 @@ async function encryptKeyForDevice(
   recipientJid: string,
   deviceId: number,
   messageKey: Uint8Array,
-  log?: Logger
+  log?: Logger,
+  protocol?: OmemoProtocol
 ): Promise<{ encryptedKey: Uint8Array; isPreKey: boolean } | null> {
   // Use the account's own JID if recipientJid is empty (self)
   // store.getSelfJid() returns the real JID (e.g., aurora@sazsxm.com)
@@ -965,7 +977,7 @@ async function encryptKeyForDevice(
   // Check if we have a session
   if (!store.hasSession(targetJid, deviceId)) {
     // Need to establish session - fetch bundle
-    const bundle = await fetchBundle(accountId, targetJid, deviceId, log);
+    const bundle = await fetchBundle(accountId, targetJid, deviceId, log, protocol);
     if (!bundle) {
       log?.debug?.(`[${accountId}] No bundle for ${targetJid}:${deviceId}`);
       return null;

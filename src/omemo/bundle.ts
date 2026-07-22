@@ -90,7 +90,8 @@ export async function fetchBundle(
   accountId: string,
   jid: string,
   deviceId: number,
-  log?: Logger
+  log?: Logger,
+  protocol?: OmemoProtocol
 ): Promise<OmemoBundle | null> {
   if (jid && isTrackedMucJid(accountId, jid)) {
     log?.warn?.(`[${accountId}] OMEMO refusing bundle lookup for bare MUC ${jid}; resolve occupant real JID first`);
@@ -98,8 +99,8 @@ export async function fetchBundle(
   }
   try {
     const v2Node = `${NS_OMEMO_BUNDLES_V2}:${deviceId}`;
-    let result = await pepFetch(accountId, jid, v2Node, undefined, log);
-    if (!result.ok || !result.data?.length) {
+    let result = await pepFetch(accountId, jid, protocol === "legacy" ? `${NS_OMEMO_BUNDLES}:${deviceId}` : v2Node, undefined, log);
+    if (!protocol && (!result.ok || !result.data?.length)) {
       result = await pepFetch(accountId, jid, `${NS_OMEMO_BUNDLES}:${deviceId}`, undefined, log);
     }
 
