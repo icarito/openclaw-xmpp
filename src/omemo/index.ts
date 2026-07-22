@@ -15,7 +15,7 @@ import { publishDeviceId, fetchDeviceList } from "./device.js";
 import { publishBundle, fetchBundle, buildBundleFromStore } from "./bundle.js";
 import { NS_OMEMO, NS_OMEMO_DEVICES, OMEMO_NAMESPACES, NS_OMEMO_LEGACY, NS_OMEMO_V2, type OmemoStoreData, type OmemoDevice, type OmemoProtocol } from "./types.js";
 import { loadOmemoStoreData, saveOmemoStoreData } from "./persistence.js";
-import { decryptV2Payload, encryptV2Payload } from "./v2-crypto.js";
+import { bareJid, decryptV2Payload, encryptV2Payload } from "./v2-crypto.js";
 import {
   getDeviceList,
   handleDeviceListPepEvent,
@@ -278,13 +278,13 @@ export function isOmemoEncrypted(stanza: Element): boolean {
  * The envelope, rather than a bare body string, is what gets authenticated
  * and encrypted.  MUC messages carry a mandatory `to` affix.
  */
-function buildSceEnvelope(plaintext: string, to?: string): string {
+export function buildSceEnvelope(plaintext: string, to?: string): string {
   const padLength = crypto.getRandomValues(new Uint8Array(1))[0]! % 201;
   const rpad = Array.from(crypto.getRandomValues(new Uint8Array(padLength)), b => String.fromCharCode(65 + (b % 26))).join("");
   const content = xml("content", { xmlns: "urn:xmpp:sce:1" },
     xml("body", { xmlns: "jabber:client" }, plaintext));
   const envelope = xml("envelope", { xmlns: "urn:xmpp:sce:1" }, content,
-    xml("rpad", {}, rpad), ...(to ? [xml("to", { jid: to })] : []));
+    xml("rpad", {}, rpad), ...(to ? [xml("to", { jid: bareJid(to) })] : []));
   return envelope.toString();
 }
 
@@ -462,7 +462,7 @@ export async function decryptOmemoMessage(
     log?.debug?.(`[${accountId}] OMEMO AES: ivLen=${iv.length}, keyLen=${messageKey.length}, ciphertextLen=${ciphertext.length}`);
 
     const decryptedPayload = isV2
-      ? new TextDecoder().decode(decryptV2Payload(ciphertext, messageKey.slice(0, 32)))
+      ? new TextDecoder().decode(decryptV2Payload(ciphertext, messageKey))
       : await decryptPayload(ciphertext, messageKey, iv, log);
     const plaintext = isV2 ? unwrapScePayload(decryptedPayload) : decryptedPayload;
 

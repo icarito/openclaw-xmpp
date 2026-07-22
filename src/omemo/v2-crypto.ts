@@ -13,6 +13,23 @@ const ZERO_SALT = Buffer.alloc(32);
 
 export type V2Payload = { key: Uint8Array; payload: Uint8Array };
 
+/** Return the bare form of a JID (the form required by OMEMO/SCE). */
+export function bareJid(jid: string): string {
+  const value = jid.trim();
+  const slash = value.indexOf("/");
+  return slash < 0 ? value : value.slice(0, slash);
+}
+
+/**
+ * Signal associated data for an OMEMO session.  XEP-0384 defines this as
+ * Encode(IK_A) || Encode(IK_B), never as JID text or a protobuf envelope.
+ */
+export function associatedData(identityKeyA: Uint8Array, identityKeyB: Uint8Array): Uint8Array {
+  const a = Buffer.from(identityKeyA);
+  const b = Buffer.from(identityKeyB);
+  return new Uint8Array(Buffer.concat([a, b]));
+}
+
 function varint(n: number): Buffer {
   const out: number[] = [];
   let x = n >>> 0;
@@ -26,16 +43,30 @@ function bytesField(field: number, value: Uint8Array): Buffer {
 }
 
 /** Encode OMEMOMessage + OMEMOAuthenticatedMessage (protobuf wire format). */
-export function encodeAuthenticatedMessage(ciphertext: Uint8Array, mac: Uint8Array): Uint8Array {
-  // n/pn are populated as zero until the Signal implementation exposes the
-  // ratchet header. dh_pub is required by the schema and is therefore encoded
-  // as an empty bytes field rather than omitted.
+export interface RatchetHeader {
+  n: number;
+  pn: number;
+  dh_pub: Uint8Array;
+}
+
+export function encodeAuthenticatedMessage(
+  ciphertext: Uint8Array,
+  mac: Uint8Array,
+  header: RatchetHeader = { n: 0, pn: 0, dh_pub: new Uint8Array() },
+): Uint8Array {
   const message = Buffer.concat([
-    Buffer.from([0x08, 0x00, 0x10, 0x00]),
-    bytesField(3, new Uint8Array()),
+    Buffer.concat([Buffer.from([0x08]), varint(header.n >>> 0)]),
+    Buffer.concat([Buffer.from([0x10]), varint(header.pn >>> 0)]),
+    bytesField(3, header.dh_pub),
     bytesField(4, ciphertext),
   ]);
   return Buffer.concat([bytesField(1, mac), bytesField(2, message)]);
+}
+
+/** Rebuild the authenticated protobuf with the Signal Double Ratchet header. */
+export function withRatchetHeader(payload: Uint8Array, header: RatchetHeader): Uint8Array {
+  const decoded = decodeAuthenticatedMessage(payload);
+  return encodeAuthenticatedMessage(decoded.ciphertext, decoded.mac, header);
 }
 
 function readVarint(buf: Uint8Array, offset: number): { value: number; next: number } {
@@ -93,7 +124,7 @@ export function encryptV2Payload(plaintext: Uint8Array): V2Payload {
 
 export function decryptV2Payload(payload: Uint8Array, key: Uint8Array): Uint8Array {
   const { ciphertext, mac } = decodeAuthenticatedMessage(payload);
-  if (key.length < 32) throw new Error("OMEMO 2 transport key is truncated");
+  if (key.length !== 32 && key.length !== 48) throw new Error("OMEMO 2 transport key must be 32 or 48 bytes");
   const m = material(key.subarray(0, 32));
   const expected = crypto.createHmac("sha256", m.auth).update(ciphertext).digest().subarray(0, 16);
   if (!crypto.timingSafeEqual(Buffer.from(mac), expected)) throw new Error("OMEMO 2 payload HMAC verification failed");
