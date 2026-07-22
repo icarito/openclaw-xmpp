@@ -201,6 +201,33 @@ export function createXmppProgressController(params: {
     await finalizeWithFinalText(NO_REPLY_PLACEHOLDER_TEXT);
   };
 
+  /** Cierre de turno por ERROR (excepción en el pipeline del agente). La
+   * burbuja no puede quedar viva: sin una corrección terminal, el cliente la
+   * muestra "trabajando" para siempre y la presencia queda ocupada. El
+   * contenido parcial se conserva con la línea de fallo añadida; si no hay
+   * burbuja viva, el fallo igual se entrega como mensaje — antes desaparecía
+   * por completo y el usuario se quedaba sin ninguna señal del problema. */
+  const finishWithError = async (err: unknown) => {
+    const reason =
+      markdownToPlain(String(err ?? "error")).replace(/\s+/g, " ").trim().slice(0, 200) ||
+      "error desconocido";
+    let handled = false;
+    if (active) {
+      const base = hasSubstantiveContent() ? composeBubbleText().trim() : "";
+      const text = base ? `${base}\n\n⚠️ ${reason}` : `⚠️ ${reason}`;
+      handled = await finalizeWithFinalText(text);
+    }
+    if (!handled) {
+      // Sin burbuja viva (o streaming off): el fallo igual debe llegar —
+      // antes desaparecía por completo y el chat quedaba en silencio.
+      try {
+        await sendMessageXmpp(params.target, `⚠️ ${reason}`, sendOpts);
+      } catch (sendErr) {
+        params.log?.(`[xmpp] error notice failed for ${params.target}: ${String(sendErr)}`);
+      }
+    }
+  };
+
   /**
    * Se llama antes de entregar cualquier respuesta visible del agente. NO
    * cierra nada (la burbuja sigue viva para las tools que vengan después);
@@ -443,6 +470,7 @@ export function createXmppProgressController(params: {
     active,
     closeWindow,
     finalizeWithFinalText,
+    finishWithError,
     handleApprovalEvent,
     handleCommandOutput,
     handleItemEvent,

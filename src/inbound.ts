@@ -494,82 +494,95 @@ export async function handleXmppInbound(params: {
   });
   await progress.start();
   let deliveredVisibleReply = false;
+  let turnError: unknown = null;
 
-  await core.channel.inbound.dispatchReply({
-    cfg: config as OpenClawConfig,
-    channel: CHANNEL_ID,
-    accountId: account.accountId,
-    agentId: route.agentId,
-    routeSessionKey: route.sessionKey,
-    storePath,
-    ctxPayload,
-    recordInboundSession: core.channel.session.recordInboundSession,
-    dispatchReplyWithBufferedBlockDispatcher: core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
-    delivery: {
-      deliver: async (payload) => {
-        deliveredVisibleReply = true;
-        const p = payload as OutboundReplyPayload & {
-          presentation?: unknown;
-          mediaUrl?: string | null;
-          channelData?: Record<string, unknown>;
-          text?: string | null;
-        };
-        // Finalización de preview estilo Telegram: una respuesta de texto puro
-        // convierte la burbuja de progreso en la respuesta final (una última
-        // corrección XEP-0308) en vez de llegar como mensaje aparte.
-        if (p.text && !p.presentation && !p.mediaUrl && !p.channelData) {
-          const handled = await progress.finalizeWithFinalText(p.text);
-          if (handled) {
-            statusSink?.({ lastOutboundAt: Date.now() });
-            return;
+  try {
+    await core.channel.inbound.dispatchReply({
+      cfg: config as OpenClawConfig,
+      channel: CHANNEL_ID,
+      accountId: account.accountId,
+      agentId: route.agentId,
+      routeSessionKey: route.sessionKey,
+      storePath,
+      ctxPayload,
+      recordInboundSession: core.channel.session.recordInboundSession,
+      dispatchReplyWithBufferedBlockDispatcher: core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
+      delivery: {
+        deliver: async (payload) => {
+          deliveredVisibleReply = true;
+          const p = payload as OutboundReplyPayload & {
+            presentation?: unknown;
+            mediaUrl?: string | null;
+            channelData?: Record<string, unknown>;
+            text?: string | null;
+          };
+          // Finalización de preview estilo Telegram: una respuesta de texto puro
+          // convierte la burbuja de progreso en la respuesta final (una última
+          // corrección XEP-0308) en vez de llegar como mensaje aparte.
+          if (p.text && !p.presentation && !p.mediaUrl && !p.channelData) {
+            const handled = await progress.finalizeWithFinalText(p.text);
+            if (handled) {
+              statusSink?.({ lastOutboundAt: Date.now() });
+              return;
+            }
+          } else {
+            // Payload no finalizable (media/card): drenar la edición pendiente
+            // para que la burbuja esté al día antes de la respuesta.
+            await progress.closeWindow();
           }
-        } else {
-          // Payload no finalizable (media/card): drenar la edición pendiente
-          // para que la burbuja esté al día antes de la respuesta.
-          await progress.closeWindow();
-        }
-        await deliverXmppReply({
-          payload,
-          cfg: config,
-          target: peerId,
-          accountId: account.accountId,
-          sendReply: params.sendReply,
-          statusSink,
-        });
+          await deliverXmppReply({
+            payload,
+            cfg: config,
+            target: peerId,
+            accountId: account.accountId,
+            sendReply: params.sendReply,
+            statusSink,
+          });
+        },
+        onError: (err, info) => {
+          runtime.error?.(`xmpp ${info.kind} reply failed: ${String(err)}`);
+        },
       },
-      onError: (err, info) => {
-        runtime.error?.(`xmpp ${info.kind} reply failed: ${String(err)}`);
+      replyPipeline: {},
+      replyOptions: {
+        // XMPP is conversational: when a human talks while the agent is already
+        // working, treat the new message as steering for the active turn instead
+        // of silently stacking a follow-up behind it.
+        streamingBehavior: "steer",
+        skillFilter: groupMatch.groupConfig?.skills,
+        disableBlockStreaming:
+          typeof blockStreamingEnabled === "boolean" ? !blockStreamingEnabled : undefined,
+        ...(progress.active
+          ? {
+              suppressDefaultToolProgressMessages: progress.suppressDefaultToolProgressMessages,
+              preserveProgressCallbackStartOrder: true,
+              onPartialReply: progress.handlePartialReply,
+              onToolStart: progress.handleToolStart,
+              onItemEvent: progress.handleItemEvent,
+              onApprovalEvent: progress.handleApprovalEvent,
+              onCommandOutput: progress.handleCommandOutput,
+              onPatchSummary: progress.handlePatchSummary,
+            }
+          : {}),
+      } as XmppReplyOptions,
+      record: {
+        onRecordError: (err) => {
+          runtime.error?.(`xmpp: failed updating session meta: ${String(err)}`);
+        },
       },
-    },
-    replyPipeline: {},
-    replyOptions: {
-      // XMPP is conversational: when a human talks while the agent is already
-      // working, treat the new message as steering for the active turn instead
-      // of silently stacking a follow-up behind it.
-      streamingBehavior: "steer",
-      skillFilter: groupMatch.groupConfig?.skills,
-      disableBlockStreaming:
-        typeof blockStreamingEnabled === "boolean" ? !blockStreamingEnabled : undefined,
-      ...(progress.active
-        ? {
-            suppressDefaultToolProgressMessages: progress.suppressDefaultToolProgressMessages,
-            preserveProgressCallbackStartOrder: true,
-            onPartialReply: progress.handlePartialReply,
-            onToolStart: progress.handleToolStart,
-            onItemEvent: progress.handleItemEvent,
-            onApprovalEvent: progress.handleApprovalEvent,
-            onCommandOutput: progress.handleCommandOutput,
-            onPatchSummary: progress.handlePatchSummary,
-          }
-        : {}),
-    } as XmppReplyOptions,
-    record: {
-      onRecordError: (err) => {
-        runtime.error?.(`xmpp: failed updating session meta: ${String(err)}`);
-      },
-    },
-  });
-  if (!deliveredVisibleReply) {
+    });
+  } catch (err) {
+    turnError = err;
+    runtime.error?.(`xmpp turn failed for ${peerId}: ${String(err)}`);
+  }
+  // El cierre del turno NO puede depender de que el pipeline haya terminado
+  // bien: una excepción (exec fallido, modelo caído, red) antes se saltaba
+  // TODO esto — la burbuja de progreso quedaba viva para siempre (el cliente
+  // la muestra "trabajando" sin fin) y la presencia ocupada. Finalizar
+  // siempre, y que el fallo sea visible en vez de silencioso.
+  if (turnError && !deliveredVisibleReply) {
+    await progress.finishWithError(turnError);
+  } else if (!deliveredVisibleReply) {
     await progress.finishWithoutReply();
   }
   // A final reply may be delivered by editing the progress bubble. Unlike a
@@ -578,4 +591,7 @@ export async function handleXmppInbound(params: {
     cfg: config,
     accountId: account.accountId,
   }).catch(() => {});
+  if (turnError) {
+    throw turnError;
+  }
 }
