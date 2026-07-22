@@ -271,6 +271,29 @@ export function isOmemoEncrypted(stanza: Element): boolean {
   return getOmemoEncrypted(stanza) !== null;
 }
 
+/** Build the XML envelope required by the OMEMO 2 SCE profile (XEP-0420).
+ * The envelope, rather than a bare body string, is what gets authenticated
+ * and encrypted.  MUC messages carry a mandatory `to` affix.
+ */
+function buildSceEnvelope(plaintext: string, to?: string): string {
+  const padLength = crypto.getRandomValues(new Uint8Array(1))[0]! % 201;
+  const rpad = Array.from(crypto.getRandomValues(new Uint8Array(padLength)), b => String.fromCharCode(65 + (b % 26))).join("");
+  const content = xml("content", { xmlns: "urn:xmpp:sce:1" },
+    xml("body", { xmlns: "jabber:client" }, plaintext));
+  const envelope = xml("envelope", { xmlns: "urn:xmpp:sce:1" }, content,
+    xml("rpad", {}, rpad), ...(to ? [xml("to", { jid: to })] : []));
+  return envelope.toString();
+}
+
+/** Extract the body from a decrypted SCE envelope, accepting legacy plaintext. */
+function unwrapScePayload(payload: string): string {
+  if (!payload.includes("urn:xmpp:sce:1")) return payload;
+  const match = payload.match(/<body(?:\s[^>]*)?>([\s\S]*?)<\/body>/i);
+  if (!match) return payload;
+  return match[1]!.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+}
+
 // =============================================================================
 // DECRYPTION
 // =============================================================================
@@ -435,7 +458,8 @@ export async function decryptOmemoMessage(
 
     log?.debug?.(`[${accountId}] OMEMO AES: ivLen=${iv.length}, keyLen=${messageKey.length}, ciphertextLen=${ciphertext.length}`);
 
-    const plaintext = await decryptPayload(ciphertext, messageKey, iv, log);
+    const decryptedPayload = await decryptPayload(ciphertext, messageKey, iv, log);
+    const plaintext = isV2 ? unwrapScePayload(decryptedPayload) : decryptedPayload;
 
     log?.debug?.(`[${accountId}] OMEMO decrypted message from ${senderJid}:${senderDeviceId}`);
     return plaintext;
@@ -633,12 +657,14 @@ export async function encryptOmemoMessage(
 
     log?.debug?.(`[${accountId}] OMEMO multi-device: ${devices.length} recipient devices, ${otherOwnDevices.length} own other devices`);
 
+    const isV2 = getOmemoProtocol(accountId) === "v2";
+    const payloadPlaintext = isV2 ? buildSceEnvelope(plaintext, recipientJid) : plaintext;
     // Legacy OMEMO: Generate 16-byte AES key and 12-byte IV
     const aesKey = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
 
     // Encrypt payload with AES-128-GCM
-    const { ciphertext, authTag } = await encryptPayloadLegacy(plaintext, aesKey, iv, log);
+    const { ciphertext, authTag } = await encryptPayloadLegacy(payloadPlaintext, aesKey, iv, log);
 
     // Legacy OMEMO: messageKey = aesKey (16) + authTag (16) = 32 bytes
     const messageKey = new Uint8Array(32);
@@ -668,10 +694,7 @@ export async function encryptOmemoMessage(
           keyElements.push(
             xml(
               "key",
-              {
-                rid: String(device.id),
-                ...(result.isPreKey ? { prekey: "true" } : {}),
-              },
+              { rid: String(device.id), ...(isV2 ? (result.isPreKey ? { kex: "true" } : {}) : (result.isPreKey ? { prekey: "true" } : {})) },
               toBase64(result.encryptedKey)
             )
           );
@@ -697,10 +720,7 @@ export async function encryptOmemoMessage(
           keyElements.push(
             xml(
               "key",
-              {
-                rid: String(device.id),
-                ...(result.isPreKey ? { prekey: "true" } : {}),
-              },
+              { rid: String(device.id), ...(isV2 ? (result.isPreKey ? { kex: "true" } : {}) : (result.isPreKey ? { prekey: "true" } : {})) },
               toBase64(result.encryptedKey)
             )
           );
@@ -720,12 +740,9 @@ export async function encryptOmemoMessage(
     const encrypted = xml(
       "encrypted",
       { xmlns: getOmemoProtocol(accountId) === "v2" ? NS_OMEMO_V2 : NS_OMEMO },
-      xml(
-        "header",
-        { sid: String(store.getDeviceId()) },
-        ...keyElements,
-        xml("iv", {}, toBase64(iv))
-      ),
+      xml("header", { sid: String(store.getDeviceId()) },
+        ...(isV2 ? [xml("keys", { jid: recipientJid }, ...keyElements)] : keyElements),
+        xml("iv", {}, toBase64(iv))),
       xml("payload", {}, toBase64(ciphertext))
     );
 
@@ -805,12 +822,14 @@ export async function encryptMucOmemoMessage(
 
     log?.debug?.(`[${accountId}] MUC OMEMO: ${allDevices.length} occupant devices, ${ownDevicesToEncrypt.length} own devices (incl. self)`);
 
+    const isV2 = getOmemoProtocol(accountId) === "v2";
+    const payloadPlaintext = isV2 ? buildSceEnvelope(plaintext, roomJid) : plaintext;
     // Legacy OMEMO: Generate 16-byte AES key and 12-byte IV
     const aesKey = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
 
     // Encrypt payload with AES-128-GCM
-    const { ciphertext, authTag } = await encryptPayloadLegacy(plaintext, aesKey, iv, log);
+    const { ciphertext, authTag } = await encryptPayloadLegacy(payloadPlaintext, aesKey, iv, log);
 
     // Legacy OMEMO: messageKey = aesKey (16) + authTag (16) = 32 bytes
     const messageKey = new Uint8Array(32);
@@ -840,7 +859,7 @@ export async function encryptMucOmemoMessage(
               "key",
               {
                 rid: String(deviceId),
-                ...(result.isPreKey ? { prekey: "true" } : {}),
+                ...(isV2 ? (result.isPreKey ? { kex: "true" } : {}) : (result.isPreKey ? { prekey: "true" } : {})),
               },
               toBase64(result.encryptedKey)
             )
@@ -869,7 +888,7 @@ export async function encryptMucOmemoMessage(
               "key",
               {
                 rid: String(device.id),
-                ...(result.isPreKey ? { prekey: "true" } : {}),
+                ...(isV2 ? (result.isPreKey ? { kex: "true" } : {}) : (result.isPreKey ? { prekey: "true" } : {})),
               },
               toBase64(result.encryptedKey)
             )
@@ -887,17 +906,11 @@ export async function encryptMucOmemoMessage(
     }
 
     // Build OMEMO message
-    const encrypted = xml(
-      "encrypted",
-      { xmlns: getOmemoProtocol(accountId) === "v2" ? NS_OMEMO_V2 : NS_OMEMO },
-      xml(
-        "header",
-        { sid: String(store.getDeviceId()) },
-        ...keyElements,
-        xml("iv", {}, toBase64(iv))
-      ),
-      xml("payload", {}, toBase64(ciphertext))
-    );
+    const encrypted = xml("encrypted", { xmlns: isV2 ? NS_OMEMO_V2 : NS_OMEMO },
+      xml("header", { sid: String(store.getDeviceId()) },
+        ...(isV2 ? [xml("keys", { jid: roomJid }, ...keyElements)] : keyElements),
+        xml("iv", {}, toBase64(iv))),
+      xml("payload", {}, toBase64(ciphertext)));
 
     log?.info?.(`[${accountId}] MUC OMEMO encrypted for ${occupantDevicesEncrypted}/${allDevices.length} occupant devices + ${ownDevicesEncrypted}/${ownDevicesToEncrypt.length} own devices in ${roomJid}`);
     return encrypted;
