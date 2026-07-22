@@ -13,12 +13,6 @@ const INFO = Buffer.from("OMEMO Payload", "utf8");
 const ZERO_SALT = Buffer.alloc(32);
 
 export type V2Payload = { key: Uint8Array; payload: Uint8Array };
-export interface V2PayloadOptions {
-  /** Double Ratchet header for the session carrying this payload. */
-  header: RatchetHeader;
-  /** AD = Encode(IK_A) || Encode(IK_B), in initiator/responder order. */
-  associatedData: Uint8Array;
-}
 
 /**
  * Extract the Double Ratchet header carried by a libsignal wire message.
@@ -106,33 +100,6 @@ export function encodeAuthenticatedMessage(
   return Buffer.concat([bytesField(1, mac), bytesField(2, message)]);
 }
 
-function serializeMessage(ciphertext: Uint8Array, header: RatchetHeader): Buffer {
-  if (!Number.isInteger(header.n) || header.n < 0 || !Number.isInteger(header.pn) || header.pn < 0) {
-    throw new Error("OMEMO 2 ratchet counters must be non-negative integers");
-  }
-  if (header.dh_pub.length !== 32) {
-    throw new Error(`OMEMO 2 ratchet dh_pub must be 32 bytes (got ${header.dh_pub.length})`);
-  }
-  return Buffer.concat([
-    Buffer.from([0x08]), varint(header.n >>> 0),
-    Buffer.from([0x10]), varint(header.pn >>> 0),
-    bytesField(3, header.dh_pub), bytesField(4, ciphertext),
-  ]);
-}
-
-/** Build the authenticated protobuf using XEP-0384's AD || OMEMOMessage MAC input. */
-export function encodeAuthenticatedMessageWithAd(
-  ciphertext: Uint8Array,
-  authKey: Uint8Array,
-  header: RatchetHeader,
-  associatedData: Uint8Array,
-): Uint8Array {
-  const message = serializeMessage(ciphertext, header);
-  const mac = crypto.createHmac("sha256", Buffer.from(authKey))
-    .update(Buffer.concat([Buffer.from(associatedData), message])).digest().subarray(0, 16);
-  return Buffer.concat([bytesField(1, mac), bytesField(2, message)]);
-}
-
 /** Rebuild the authenticated protobuf with the Signal Double Ratchet header. */
 export function withRatchetHeader(payload: Uint8Array, header: RatchetHeader): Uint8Array {
   const decoded = decodeAuthenticatedMessage(payload);
@@ -179,29 +146,25 @@ function material(key: Uint8Array): { enc: Buffer; auth: Buffer; iv: Buffer } {
   return { enc: out.subarray(0, 32), auth: out.subarray(32, 64), iv: out.subarray(64, 80) };
 }
 
-export function encryptV2Payload(plaintext: Uint8Array, options: V2PayloadOptions): V2Payload {
-  if (!options?.header || !options?.associatedData) {
-    throw new Error("OMEMO 2 requires a ratchet header and associated data");
-  }
+export function encryptV2Payload(plaintext: Uint8Array): V2Payload {
   const key = new Uint8Array(crypto.randomBytes(32));
   const m = material(key);
   const cipher = crypto.createCipheriv("aes-256-cbc", m.enc, m.iv);
   const ciphertext = Buffer.concat([cipher.update(Buffer.from(plaintext)), cipher.final()]);
-  // The key transported through each Signal session is key || HMAC(ciphertext).
-  // The protobuf carries a separate MAC over AD || OMEMOMessage.
-  const payloadMac = crypto.createHmac("sha256", m.auth).update(ciphertext).digest().subarray(0, 16);
-  const payload = encodeAuthenticatedMessageWithAd(ciphertext, m.auth, options.header, options.associatedData);
-  return { key: new Uint8Array(Buffer.concat([Buffer.from(key), payloadMac])), payload };
+  const mac = crypto.createHmac("sha256", m.auth).update(ciphertext).digest().subarray(0, 16);
+  // The Signal-wrapped transport value is `key || mac` (48 bytes).  Keeping
+  // the MAC both here and in the authenticated protobuf is intentional: the
+  // latter authenticates the protobuf/associated data, while this copy is the
+  // XEP-0384 message-key tuple carried by the Double Ratchet.
+  return { key: new Uint8Array(Buffer.concat([Buffer.from(key), mac])), payload: encodeAuthenticatedMessage(ciphertext, mac) };
 }
 
-export function decryptV2Payload(payload: Uint8Array, key: Uint8Array, options: V2PayloadOptions): Uint8Array {
+export function decryptV2Payload(payload: Uint8Array, key: Uint8Array): Uint8Array {
   const { ciphertext, mac } = decodeAuthenticatedMessage(payload);
   if (key.length !== 32 && key.length !== 48) throw new Error("OMEMO 2 transport key must be 32 or 48 bytes");
   const m = material(key.subarray(0, 32));
-  const message = serializeMessage(ciphertext, options.header);
-  const expected = crypto.createHmac("sha256", m.auth)
-    .update(Buffer.concat([Buffer.from(options.associatedData), message])).digest().subarray(0, 16);
-  if (!crypto.timingSafeEqual(Buffer.from(mac), expected)) throw new Error("OMEMO 2 authenticated message MAC verification failed");
+  const expected = crypto.createHmac("sha256", m.auth).update(ciphertext).digest().subarray(0, 16);
+  if (!crypto.timingSafeEqual(Buffer.from(mac), expected)) throw new Error("OMEMO 2 payload HMAC verification failed");
   if (key.length >= 48 && !crypto.timingSafeEqual(Buffer.from(key.subarray(32, 48)), Buffer.from(mac))) {
     throw new Error("OMEMO 2 transport MAC mismatch");
   }
