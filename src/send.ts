@@ -1,6 +1,13 @@
 // Xmpp plugin module implements send behavior.
 import { client, xml } from "@xmpp/client";
+import type { Element } from "@xmpp/xml";
 import crypto from "node:crypto";
+import {
+  encryptOmemoMessage,
+  encryptMucOmemoMessage,
+  isRoomOmemoCapable,
+  buildOmemoMessageStanza,
+} from "./omemo/index.js";
 import {
   createMessageReceiptFromOutboundResults,
   type MessageReceipt,
@@ -354,10 +361,38 @@ export async function sendMessageXmpp(
   let firstId: string | undefined;
   if (connection?.isConnected()) {
     const chunks = splitForLimit(plain, XMPP_MAX_BODY);
+    const logger = getXmppRuntime().logging.getChildLogger({
+      channel: "xmpp",
+      accountId: account.accountId,
+    });
     try {
       for (let i = 0; i < chunks.length; i++) {
         const id = nextStanzaId();
         if (i === 0) firstId = id;
+
+        if (account.config.omemo?.enabled) {
+          let encryptedElement: Element | null = null;
+          if (type === "groupchat") {
+            if (isRoomOmemoCapable(account.accountId, target)) {
+              encryptedElement = await encryptMucOmemoMessage(account.accountId, target, chunks[i]!, logger);
+            } else {
+              logger.warn(`[${account.accountId}] OMEMO MUC fallback: room ${target} is semi-anonymous/anonymous or has no occupants with OMEMO, sending plaintext`);
+            }
+          } else {
+            encryptedElement = await encryptOmemoMessage(account.accountId, target, chunks[i]!, logger);
+            if (!encryptedElement) {
+              logger.warn(`[${account.accountId}] OMEMO fallback: recipient ${target} has no OMEMO devices published, sending plaintext`);
+            }
+          }
+
+          if (encryptedElement) {
+            const stanza = buildOmemoMessageStanza(target, encryptedElement, type);
+            stanza.attrs.id = id;
+            await connection.send(stanza);
+            continue;
+          }
+        }
+
         await connection.send(xml("message", { type, to: target, id }, xml("body", {}, chunks[i]!)));
       }
     } finally {

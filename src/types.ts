@@ -66,7 +66,11 @@ export type XmppAccountConfig = {
   capabilities?: XmppCapabilitiesConfig;
   /** Context-window size used to compute the /context percentage. */
   contextWindowTokens?: number;
-  /** XEP-0198 stream resumption configuration. */
+  /** OMEMO encryption configuration. */
+  omemo?: {
+    enabled?: boolean;
+    deviceLabel?: string;
+  };
   streamManagement?: {
     enabled?: boolean;
     resumptionMaxSeconds?: number;
@@ -103,6 +107,7 @@ export type XmppInboundMessage = {
   oobUrl?: string;
   /** True when this message arrived through XEP-0280 from another resource. */
   isCarbonCopy?: boolean;
+  wasEncrypted?: boolean;
 };
 
 export type XmppProbe = BaseProbeResult<string> & {

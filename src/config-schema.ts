@@ -57,6 +57,13 @@ const XmppAccountSchemaBase = z
       })
       .strict()
       .optional(),
+    omemo: z
+      .object({
+        enabled: z.boolean().optional(),
+        deviceLabel: z.string().optional(),
+      })
+      .strict()
+      .optional(),
     ...ReplyRuntimeConfigSchemaShape,
   })
   .strict();

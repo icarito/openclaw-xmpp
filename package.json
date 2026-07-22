@@ -94,6 +94,7 @@
     }
   },
   "dependencies": {
+    "@privacyresearch/libsignal-protocol-typescript": "^0.0.16",
     "@xmpp/client": "^0.13.1",
     "@xmpp/xml": "^0.13.1",
     "zod": "4.4.3"

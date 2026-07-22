@@ -26,6 +26,13 @@ import { startTelemetryLoop, type TelemetryLoopHandle } from "./telemetry.js";
 import type { RuntimeEnv } from "./runtime-api.js";
 import { getXmppRuntime } from "./runtime.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
+import {
+  initializeOmemo,
+  shutdownOmemo,
+  decryptOmemoMessage,
+  isOmemoEncrypted,
+  handleMucPresence,
+} from "./omemo/index.js";
 
 type XmppMonitorOptions = {
   accountId?: string;
@@ -243,6 +250,14 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
         telemetryLoop?.stop();
         telemetryLoop = startTelemetryLoop({ account, cfg, connection: onlineConnection, logger });
         logger.info(`[${account.accountId}] connected as ${jid}`);
+
+        if (account.config.omemo?.enabled) {
+          try {
+            await initializeOmemo(account.accountId, account.jid, account.config.omemo.deviceLabel, logger);
+          } catch (err) {
+            logger.error(`[${account.accountId}] OMEMO initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         // Un turno que muere entre setTyping y clearTyping (rebound de sesión,
         // kill -9, restart del proceso) deja una presencia dnd/processing
         // dirigida (buildStatusPresence con `to=<peer>`) que el cliente del
@@ -306,6 +321,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     // here: several bot accounts may see each other's requests, and mirroring
     // subscribe stanzas from this handler can create a presence ping-pong.
     if (stanza.is("presence")) {
+      handleMucPresence(stanza, account.accountId, logger);
       const ptype = stanza.attrs.type;
       const from = stanza.attrs.from as string | undefined;
       if (!from || !connection) return;
@@ -347,7 +363,28 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       return;
     }
 
-    const body = realStanza.getChildText("body") || "";
+    let body = realStanza.getChildText("body") || "";
+    let wasEncrypted = false;
+
+    if (account.config.omemo?.enabled && isOmemoEncrypted(realStanza)) {
+      logger.debug?.(`[${account.accountId}] OMEMO encrypted message detected`);
+      try {
+        const decryptedBody = await decryptOmemoMessage(account.accountId, realStanza, logger);
+        if (decryptedBody) {
+          body = decryptedBody;
+          wasEncrypted = true;
+          logger.debug?.(`[${account.accountId}] OMEMO decrypted body successfully`);
+        } else {
+          logger.warn?.(`[${account.accountId}] OMEMO decryption returned null or failed`);
+        }
+      } catch (err) {
+        logger.error?.(`[${account.accountId}] OMEMO decryption error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (!account.config.omemo?.enabled && isOmemoEncrypted(realStanza)) {
+      logger.debug?.(`[${account.accountId}] OMEMO encrypted message ignored because OMEMO is disabled`);
+      return;
+    }
+
     const from = realStanza.attrs.from as string | undefined;
     if (!from) return;
 
@@ -400,6 +437,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       replyTo,
       oobUrl: oobUrl ?? undefined,
       isCarbonCopy,
+      wasEncrypted,
     };
 
     core.channel.activity.record({
@@ -448,6 +486,13 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       }
       telemetryLoop?.stop();
       telemetryLoop = null;
+
+      if (account.config.omemo?.enabled) {
+        shutdownOmemo(account.accountId, logger).catch((err) => {
+          logger.warn(`[${account.accountId}] OMEMO shutdown error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+
       if (nativeApprovalHandler && nativeApprovalHandlers.get(account.accountId) === nativeApprovalHandler) {
         nativeApprovalHandlers.delete(account.accountId);
       }
