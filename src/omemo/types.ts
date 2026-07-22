@@ -47,6 +47,8 @@ export const NS_OMEMO_BUNDLES = NS_OMEMO_BUNDLES_LEGACY;
 /** All recognized OMEMO encrypted element namespaces */
 export const OMEMO_NAMESPACES = [NS_OMEMO_LEGACY, NS_OMEMO_V2];
 
+export type OmemoProtocol = "legacy" | "v2";
+
 // =============================================================================
 // TYPE DEFINITIONS
 // =============================================================================

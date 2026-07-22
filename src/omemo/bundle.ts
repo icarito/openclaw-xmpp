@@ -9,7 +9,7 @@ import type { Element } from "@xmpp/xml";
 import { pepPublish, pepFetch } from "../pep.js";
 import type { Logger, OmemoBundle } from "./types.js";
 import { toBase64, fromBase64, getElementText } from "../xml-utils.js";
-import { NS_OMEMO, NS_OMEMO_BUNDLES } from "./types.js";
+import { NS_OMEMO, NS_OMEMO_BUNDLES, NS_OMEMO_V2, NS_OMEMO_BUNDLES_V2, type OmemoProtocol } from "./types.js";
 
 // toBase64, fromBase64, getElementText imported from xml-utils.ts
 
@@ -29,7 +29,8 @@ export async function publishBundle(
   accountId: string,
   deviceId: number,
   bundle: OmemoBundle,
-  log?: Logger
+  log?: Logger,
+  protocol: OmemoProtocol = "legacy"
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     // Build pre-key elements (legacy OMEMO format)
@@ -38,16 +39,17 @@ export async function publishBundle(
     );
 
     // Build bundle XML (legacy OMEMO format)
+    const isV2 = protocol === "v2";
     const payload = xml(
       "bundle",
-      { xmlns: NS_OMEMO },
-      xml("signedPreKeyPublic", { signedPreKeyId: String(bundle.signedPreKey.id) }, toBase64(bundle.signedPreKey.publicKey)),
-      xml("signedPreKeySignature", {}, toBase64(bundle.signedPreKey.signature)),
-      xml("identityKey", {}, toBase64(bundle.identityKey)),
+      { xmlns: isV2 ? NS_OMEMO_V2 : NS_OMEMO },
+      xml(isV2 ? "spk" : "signedPreKeyPublic", isV2 ? { id: String(bundle.signedPreKey.id) } : { signedPreKeyId: String(bundle.signedPreKey.id) }, toBase64(bundle.signedPreKey.publicKey)),
+      xml(isV2 ? "spks" : "signedPreKeySignature", {}, toBase64(bundle.signedPreKey.signature)),
+      xml(isV2 ? "ik" : "identityKey", {}, toBase64(bundle.identityKey)),
       xml("prekeys", {}, ...preKeyElements)
     );
 
-    const node = `${NS_OMEMO_BUNDLES}:${deviceId}`;
+    const node = `${isV2 ? NS_OMEMO_BUNDLES_V2 : NS_OMEMO_BUNDLES}:${deviceId}`;
     const result = await pepPublish(
       accountId,
       node,
@@ -88,8 +90,11 @@ export async function fetchBundle(
   log?: Logger
 ): Promise<OmemoBundle | null> {
   try {
-    const node = `${NS_OMEMO_BUNDLES}:${deviceId}`;
-    const result = await pepFetch(accountId, jid, node, undefined, log);
+    const v2Node = `${NS_OMEMO_BUNDLES_V2}:${deviceId}`;
+    let result = await pepFetch(accountId, jid, v2Node, undefined, log);
+    if (!result.ok || !result.data?.length) {
+      result = await pepFetch(accountId, jid, `${NS_OMEMO_BUNDLES}:${deviceId}`, undefined, log);
+    }
 
     if (!result.ok || !result.data?.length) {
       log?.warn?.(`[${accountId}] OMEMO bundle not found for ${jid}:${deviceId}`);

@@ -13,7 +13,7 @@ import { toBase64, fromBase64, getElementText } from "../xml-utils.js";
 import { OmemoStore } from "./store.js";
 import { publishDeviceId, fetchDeviceList } from "./device.js";
 import { publishBundle, fetchBundle, buildBundleFromStore } from "./bundle.js";
-import { NS_OMEMO, NS_OMEMO_DEVICES, OMEMO_NAMESPACES, NS_OMEMO_LEGACY, NS_OMEMO_V2, type OmemoStoreData, type OmemoDevice } from "./types.js";
+import { NS_OMEMO, NS_OMEMO_DEVICES, OMEMO_NAMESPACES, NS_OMEMO_LEGACY, NS_OMEMO_V2, type OmemoStoreData, type OmemoDevice, type OmemoProtocol } from "./types.js";
 import { loadOmemoStoreData, saveOmemoStoreData } from "./persistence.js";
 import {
   getDeviceList,
@@ -73,6 +73,7 @@ const omemoStores = new Map<string, OmemoStore>();
 
 /** Accounts with OMEMO enabled */
 const omemoEnabled = new Set<string>();
+const omemoProtocols = new Map<string, OmemoProtocol>();
 
 // =============================================================================
 // INITIALIZATION
@@ -90,7 +91,8 @@ export async function initializeOmemo(
   accountId: string,
   selfJid: string,
   deviceLabel?: string,
-  log?: Logger
+  log?: Logger,
+  protocol: OmemoProtocol = "legacy"
 ): Promise<OmemoStore> {
   try {
     // Create store
@@ -116,7 +118,7 @@ export async function initializeOmemo(
 
     // Publish device ID
     // If fresh start, replace entire device list to clear stale device IDs
-    await publishDeviceId(accountId, store.getDeviceId(), deviceLabel, log, isFreshStart);
+    await publishDeviceId(accountId, store.getDeviceId(), deviceLabel, log, isFreshStart, protocol);
 
     // Publish key bundle
     const signedPreKey = store.getSignedPreKey();
@@ -131,12 +133,13 @@ export async function initializeOmemo(
         },
         store.getPreKeys()
       );
-      await publishBundle(accountId, store.getDeviceId(), bundle, log);
+      await publishBundle(accountId, store.getDeviceId(), bundle, log, protocol);
     }
 
     // Track store
     omemoStores.set(accountId, store);
     omemoEnabled.add(accountId);
+    omemoProtocols.set(accountId, protocol);
 
     log?.info?.(`[${accountId}] OMEMO initialized (device ${store.getDeviceId()})`);
     return store;
@@ -159,6 +162,10 @@ export function isOmemoEnabled(accountId: string): boolean {
  */
 export function getOmemoStore(accountId: string): OmemoStore | undefined {
   return omemoStores.get(accountId);
+}
+
+export function getOmemoProtocol(accountId: string): OmemoProtocol {
+  return omemoProtocols.get(accountId) ?? "legacy";
 }
 
 /**
@@ -236,6 +243,7 @@ export async function shutdownOmemo(accountId: string, log?: Logger): Promise<vo
 
   omemoStores.delete(accountId);
   omemoEnabled.delete(accountId);
+  omemoProtocols.delete(accountId);
   log?.debug?.(`[${accountId}] OMEMO shutdown`);
 }
 
@@ -711,7 +719,7 @@ export async function encryptOmemoMessage(
     // Build OMEMO message
     const encrypted = xml(
       "encrypted",
-      { xmlns: NS_OMEMO },
+      { xmlns: getOmemoProtocol(accountId) === "v2" ? NS_OMEMO_V2 : NS_OMEMO },
       xml(
         "header",
         { sid: String(store.getDeviceId()) },
@@ -881,7 +889,7 @@ export async function encryptMucOmemoMessage(
     // Build OMEMO message
     const encrypted = xml(
       "encrypted",
-      { xmlns: NS_OMEMO },
+      { xmlns: getOmemoProtocol(accountId) === "v2" ? NS_OMEMO_V2 : NS_OMEMO },
       xml(
         "header",
         { sid: String(store.getDeviceId()) },
@@ -1074,7 +1082,7 @@ export function buildOmemoMessageStanza(
     // EME (Encryption for Message Encryption) hint
     xml("encryption", {
       xmlns: "urn:xmpp:eme:0",
-      namespace: NS_OMEMO,
+      namespace: encryptedElement.attrs?.xmlns ?? NS_OMEMO,
       name: "OMEMO",
     }),
     // Store hint for MAM

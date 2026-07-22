@@ -70,6 +70,10 @@ export type XmppAccountConfig = {
   omemo?: {
     enabled?: boolean;
     deviceLabel?: string;
+    /** Protocol namespace used for publication/envelopes (defaults to legacy). */
+    protocol?: "legacy" | "v2";
+    /** Refuse plaintext when OMEMO cannot encrypt a message. */
+    requireEncryption?: boolean;
   };
   streamManagement?: {
     enabled?: boolean;

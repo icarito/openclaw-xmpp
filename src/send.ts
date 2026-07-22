@@ -391,6 +391,9 @@ export async function sendMessageXmpp(
             await connection.send(stanza);
             continue;
           }
+          if (account.config.omemo.requireEncryption) {
+            throw new Error(`OMEMO encryption required for ${target}, but no compatible devices were available`);
+          }
         }
 
         await connection.send(xml("message", { type, to: target, id }, xml("body", {}, chunks[i]!)));

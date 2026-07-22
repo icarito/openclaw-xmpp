@@ -253,7 +253,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
 
         if (account.config.omemo?.enabled) {
           try {
-            await initializeOmemo(account.accountId, account.jid, account.config.omemo.deviceLabel, logger);
+            await initializeOmemo(account.accountId, account.jid, account.config.omemo.deviceLabel, logger, account.config.omemo.protocol ?? "legacy");
           } catch (err) {
             logger.error(`[${account.accountId}] OMEMO initialization failed: ${err instanceof Error ? err.message : String(err)}`);
           }

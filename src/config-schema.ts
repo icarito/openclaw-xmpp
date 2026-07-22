@@ -61,6 +61,8 @@ const XmppAccountSchemaBase = z
       .object({
         enabled: z.boolean().optional(),
         deviceLabel: z.string().optional(),
+        protocol: z.enum(["legacy", "v2"]).optional(),
+        requireEncryption: z.boolean().optional(),
       })
       .strict()
       .optional(),

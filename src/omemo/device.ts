@@ -8,7 +8,7 @@ import { xml } from "@xmpp/client";
 import type { Element } from "@xmpp/xml";
 import { pepPublish, pepFetch } from "../pep.js";
 import type { Logger } from "./types.js";
-import { NS_OMEMO, NS_OMEMO_DEVICES } from "./types.js";
+import { NS_OMEMO, NS_OMEMO_DEVICES, NS_OMEMO_V2, NS_OMEMO_DEVICES_V2, type OmemoProtocol } from "./types.js";
 
 // =============================================================================
 // DEVICE MANAGEMENT
@@ -26,7 +26,8 @@ export async function publishDeviceId(
   deviceId: number,
   deviceLabel?: string,
   log?: Logger,
-  replaceAll: boolean = false
+  replaceAll: boolean = false,
+  protocol: OmemoProtocol = "legacy"
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     let allDeviceIds: Set<number>;
@@ -53,11 +54,12 @@ export async function publishDeviceId(
       return xml("device", attrs);
     });
 
-    const payload = xml("list", { xmlns: NS_OMEMO }, ...deviceElements);
+    const isV2 = protocol === "v2";
+    const payload = xml(isV2 ? "devices" : "list", { xmlns: isV2 ? NS_OMEMO_V2 : NS_OMEMO }, ...deviceElements);
 
     const result = await pepPublish(
       accountId,
-      NS_OMEMO_DEVICES,
+      isV2 ? NS_OMEMO_DEVICES_V2 : NS_OMEMO_DEVICES,
       "current",
       payload,
       {
@@ -104,13 +106,11 @@ export async function fetchDeviceList(
   log?: Logger
 ): Promise<Array<{ id: number; label?: string }>> {
   try {
-    const result = await pepFetch(
-      accountId,
-      jid || undefined as unknown as string, // Empty = self
-      NS_OMEMO_DEVICES,
-      undefined,
-      log
-    );
+    // Read OMEMO 2 first, then legacy for dual-stack interoperability.
+    let result = await pepFetch(accountId, jid || undefined as unknown as string, NS_OMEMO_DEVICES_V2, undefined, log);
+    if (!result.ok || !result.data?.length) {
+      result = await pepFetch(accountId, jid || undefined as unknown as string, NS_OMEMO_DEVICES, undefined, log);
+    }
 
     if (!result.ok || !result.data?.length) {
       return [];
