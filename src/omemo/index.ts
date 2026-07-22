@@ -15,6 +15,7 @@ import { publishDeviceId, fetchDeviceList } from "./device.js";
 import { publishBundle, fetchBundle, buildBundleFromStore } from "./bundle.js";
 import { NS_OMEMO, NS_OMEMO_DEVICES, OMEMO_NAMESPACES, NS_OMEMO_LEGACY, NS_OMEMO_V2, type OmemoStoreData, type OmemoDevice, type OmemoProtocol } from "./types.js";
 import { loadOmemoStoreData, saveOmemoStoreData } from "./persistence.js";
+import { decryptV2Payload, encryptV2Payload } from "./v2-crypto.js";
 import {
   getDeviceList,
   handleDeviceListPepEvent,
@@ -367,12 +368,12 @@ export async function decryptOmemoMessage(
 
     // IV: legacy uses <iv> child, OMEMO 2.0 uses <iv> child
     const ivText = header.getChildText("iv");
-    if (!ivText) {
+    if (!ivText && !isV2) {
       log?.warn?.(`[${accountId}] OMEMO message missing IV`);
       return null;
     }
 
-    const iv = fromBase64(ivText);
+    const iv = ivText ? fromBase64(ivText) : new Uint8Array();
 
     // Find key element for our device
     // Legacy: <key rid="deviceId">
@@ -460,7 +461,9 @@ export async function decryptOmemoMessage(
 
     log?.debug?.(`[${accountId}] OMEMO AES: ivLen=${iv.length}, keyLen=${messageKey.length}, ciphertextLen=${ciphertext.length}`);
 
-    const decryptedPayload = await decryptPayload(ciphertext, messageKey, iv, log);
+    const decryptedPayload = isV2
+      ? new TextDecoder().decode(decryptV2Payload(ciphertext, messageKey.slice(0, 32)))
+      : await decryptPayload(ciphertext, messageKey, iv, log);
     const plaintext = isV2 ? unwrapScePayload(decryptedPayload) : decryptedPayload;
 
     log?.debug?.(`[${accountId}] OMEMO decrypted message from ${senderJid}:${senderDeviceId}`);
@@ -661,19 +664,17 @@ export async function encryptOmemoMessage(
 
     const isV2 = getOmemoProtocol(accountId) === "v2";
     const payloadPlaintext = isV2 ? buildSceEnvelope(plaintext, recipientJid) : plaintext;
-    // Legacy OMEMO: Generate 16-byte AES key and 12-byte IV
-    const aesKey = crypto.getRandomValues(new Uint8Array(16));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const v2Payload = isV2 ? encryptV2Payload(new TextEncoder().encode(payloadPlaintext)) : null;
+    // Legacy OMEMO uses a 16-byte AES-GCM key plus its 16-byte tag.
+    const aesKey = isV2 ? new Uint8Array() : crypto.getRandomValues(new Uint8Array(16));
+    const iv = isV2 ? new Uint8Array() : crypto.getRandomValues(new Uint8Array(12));
+    const legacy = isV2 ? null : await encryptPayloadLegacy(payloadPlaintext, aesKey, iv, log);
+    const messageKey = isV2 ? v2Payload!.key : (() => {
+      const k = new Uint8Array(32); k.set(aesKey, 0); k.set(legacy!.authTag, 16); return k;
+    })();
+    const ciphertext = isV2 ? v2Payload!.payload : legacy!.ciphertext;
 
-    // Encrypt payload with AES-128-GCM
-    const { ciphertext, authTag } = await encryptPayloadLegacy(payloadPlaintext, aesKey, iv, log);
-
-    // Legacy OMEMO: messageKey = aesKey (16) + authTag (16) = 32 bytes
-    const messageKey = new Uint8Array(32);
-    messageKey.set(aesKey, 0);
-    messageKey.set(authTag, 16);
-
-    log?.debug?.(`[${accountId}] OMEMO encrypt: aesKeyLen=${aesKey.length}, ivLen=${iv.length}, cipherLen=${ciphertext.length}, tagLen=${authTag.length}`);
+    log?.debug?.(`[${accountId}] OMEMO encrypt: keyLen=${messageKey.length}, ivLen=${iv.length}, payloadLen=${ciphertext.length}`);
 
     // Track encryption results for logging
     let recipientDevicesEncrypted = 0;
@@ -744,7 +745,7 @@ export async function encryptOmemoMessage(
       { xmlns: getOmemoProtocol(accountId) === "v2" ? NS_OMEMO_V2 : NS_OMEMO },
       xml("header", { sid: String(store.getDeviceId()) },
         ...(isV2 ? [xml("keys", { jid: recipientJid }, ...keyElements)] : keyElements),
-        xml("iv", {}, toBase64(iv))),
+        ...(isV2 ? [] : [xml("iv", {}, toBase64(iv))])),
       xml("payload", {}, toBase64(ciphertext))
     );
 
@@ -826,17 +827,14 @@ export async function encryptMucOmemoMessage(
 
     const isV2 = getOmemoProtocol(accountId) === "v2";
     const payloadPlaintext = isV2 ? buildSceEnvelope(plaintext, roomJid) : plaintext;
-    // Legacy OMEMO: Generate 16-byte AES key and 12-byte IV
-    const aesKey = crypto.getRandomValues(new Uint8Array(16));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    // Encrypt payload with AES-128-GCM
-    const { ciphertext, authTag } = await encryptPayloadLegacy(payloadPlaintext, aesKey, iv, log);
-
-    // Legacy OMEMO: messageKey = aesKey (16) + authTag (16) = 32 bytes
-    const messageKey = new Uint8Array(32);
-    messageKey.set(aesKey, 0);
-    messageKey.set(authTag, 16);
+    const v2Payload = isV2 ? encryptV2Payload(new TextEncoder().encode(payloadPlaintext)) : null;
+    const aesKey = isV2 ? new Uint8Array() : crypto.getRandomValues(new Uint8Array(16));
+    const iv = isV2 ? new Uint8Array() : crypto.getRandomValues(new Uint8Array(12));
+    const legacy = isV2 ? null : await encryptPayloadLegacy(payloadPlaintext, aesKey, iv, log);
+    const messageKey = isV2 ? v2Payload!.key : (() => {
+      const k = new Uint8Array(32); k.set(aesKey, 0); k.set(legacy!.authTag, 16); return k;
+    })();
+    const ciphertext = isV2 ? v2Payload!.payload : legacy!.ciphertext;
 
     // Track encryption results
     let occupantDevicesEncrypted = 0;
@@ -911,7 +909,7 @@ export async function encryptMucOmemoMessage(
     const encrypted = xml("encrypted", { xmlns: isV2 ? NS_OMEMO_V2 : NS_OMEMO },
       xml("header", { sid: String(store.getDeviceId()) },
         ...(isV2 ? [xml("keys", { jid: roomJid }, ...keyElements)] : keyElements),
-        xml("iv", {}, toBase64(iv))),
+        ...(isV2 ? [] : [xml("iv", {}, toBase64(iv))])),
       xml("payload", {}, toBase64(ciphertext)));
 
     log?.info?.(`[${accountId}] MUC OMEMO encrypted for ${occupantDevicesEncrypted}/${allDevices.length} occupant devices + ${ownDevicesEncrypted}/${ownDevicesToEncrypt.length} own devices in ${roomJid}`);

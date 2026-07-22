@@ -84,14 +84,22 @@ export function encryptV2Payload(plaintext: Uint8Array): V2Payload {
   const cipher = crypto.createCipheriv("aes-256-cbc", m.enc, m.iv);
   const ciphertext = Buffer.concat([cipher.update(Buffer.from(plaintext)), cipher.final()]);
   const mac = crypto.createHmac("sha256", m.auth).update(ciphertext).digest().subarray(0, 16);
-  return { key, payload: encodeAuthenticatedMessage(ciphertext, mac) };
+  // The Signal-wrapped transport value is `key || mac` (48 bytes).  Keeping
+  // the MAC both here and in the authenticated protobuf is intentional: the
+  // latter authenticates the protobuf/associated data, while this copy is the
+  // XEP-0384 message-key tuple carried by the Double Ratchet.
+  return { key: new Uint8Array(Buffer.concat([Buffer.from(key), mac])), payload: encodeAuthenticatedMessage(ciphertext, mac) };
 }
 
 export function decryptV2Payload(payload: Uint8Array, key: Uint8Array): Uint8Array {
   const { ciphertext, mac } = decodeAuthenticatedMessage(payload);
-  const m = material(key);
+  if (key.length < 32) throw new Error("OMEMO 2 transport key is truncated");
+  const m = material(key.subarray(0, 32));
   const expected = crypto.createHmac("sha256", m.auth).update(ciphertext).digest().subarray(0, 16);
   if (!crypto.timingSafeEqual(Buffer.from(mac), expected)) throw new Error("OMEMO 2 payload HMAC verification failed");
+  if (key.length >= 48 && !crypto.timingSafeEqual(Buffer.from(key.subarray(32, 48)), Buffer.from(mac))) {
+    throw new Error("OMEMO 2 transport MAC mismatch");
+  }
   const decipher = crypto.createDecipheriv("aes-256-cbc", m.enc, m.iv);
   return new Uint8Array(Buffer.concat([decipher.update(Buffer.from(ciphertext)), decipher.final()]));
 }
