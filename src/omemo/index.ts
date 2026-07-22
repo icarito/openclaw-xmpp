@@ -17,6 +17,13 @@ import { NS_OMEMO, NS_OMEMO_DEVICES, OMEMO_NAMESPACES, NS_OMEMO_LEGACY, NS_OMEMO
 import { loadOmemoStoreData, saveOmemoStoreData } from "./persistence.js";
 import { bareJid, decryptV2Payload, encryptV2Payload, extractRatchetHeader, type RatchetHeader } from "./v2-crypto.js";
 import {
+  decryptOmemo2,
+  encryptOmemo2,
+  hasOmemo2,
+  initializeOmemo2,
+  shutdownOmemo2,
+} from "./omemo2.js";
+import {
   getDeviceList,
   handleDeviceListPepEvent,
   clearDeviceCache,
@@ -119,10 +126,12 @@ export async function initializeOmemo(
     const data = store.exportData();
     saveOmemoStoreData(accountId, data, log);
 
-    // Publish device ID. In dual mode use the same Signal identity/device in
-    // both PEP namespaces so OMEMO 1 clients (Gajim) and OMEMO 2 clients
-    // (Dino, etc.) can discover us. Each namespace has its own device list.
-    const publishProtocols: OmemoProtocol[] = protocol === "dual" ? ["legacy", "v2"] : [protocol];
+    // The legacy Signal identity is never reused for OMEMO 2.  Dual mode
+    // publishes this store only in the legacy namespace; the independent
+    // twomemo backend below owns the v2 identity, bundle and ratchets.
+    const publishProtocols: OmemoProtocol[] = protocol === "legacy" || protocol === "dual"
+      ? ["legacy"]
+      : [];
     for (const publishProtocol of publishProtocols) {
       // If fresh, replace each namespace independently; otherwise merge with
       // the existing list in that namespace.
@@ -145,6 +154,10 @@ export async function initializeOmemo(
       for (const publishProtocol of publishProtocols) {
         await publishBundle(accountId, store.getDeviceId(), bundle, log, publishProtocol);
       }
+    }
+
+    if (protocol === "v2" || protocol === "dual") {
+      await initializeOmemo2(accountId, selfJid, deviceLabel, log, [store.getDeviceId()]);
     }
 
     // Track store
@@ -235,6 +248,7 @@ export async function prefetchDeviceLists(
  * Shutdown OMEMO for an account
  */
 export async function shutdownOmemo(accountId: string, log?: Logger): Promise<void> {
+  await shutdownOmemo2(accountId);
   const store = omemoStores.get(accountId);
   if (store) {
     // Persist final state
@@ -354,6 +368,27 @@ export async function decryptOmemoMessage(
 
   const { element: encrypted, namespace } = encryptedInfo;
   const isV2 = namespace === NS_OMEMO_V2;
+
+  if (isV2 && hasOmemo2(accountId)) {
+    const fromAttr = stanza.attrs?.from as string | undefined;
+    const msgType = stanza.attrs?.type as string | undefined;
+    let senderJid = fromAttr?.split("/")[0] ?? null;
+    if (msgType === "groupchat" && fromAttr?.includes("/")) {
+      const [roomJid, nick] = fromAttr.split("/", 2);
+      senderJid = getOccupantRealJid(accountId, roomJid!, nick!) ?? null;
+    }
+    if (!senderJid) {
+      log?.warn?.(`[${accountId}] OMEMO 2 message has no resolvable sender JID`);
+      return null;
+    }
+    try {
+      const payload = await decryptOmemo2(accountId, senderJid, encrypted);
+      return payload === null ? null : unwrapScePayload(payload);
+    } catch (err) {
+      log?.error?.(`[${accountId}] genuine OMEMO 2 decryption failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
 
   log?.debug?.(`[${accountId}] OMEMO parsing encrypted message (namespace: ${namespace})`);
 
@@ -685,6 +720,14 @@ export async function encryptOmemoMessage(
       return null;
     }
 
+    if (selectedProtocol === "v2" && hasOmemo2(accountId)) {
+      return await encryptOmemo2(
+        accountId,
+        [bareJid(recipientJid)],
+        buildSceEnvelope(plaintext, recipientJid),
+      );
+    }
+
     // Also include our own devices (except current one) for multi-device sync
     const ownDevices = configuredProtocol === "dual"
       ? await fetchDeviceList(accountId, "", log, selectedProtocol)
@@ -833,6 +876,19 @@ export async function encryptMucOmemoMessage(
   }
 
   log?.debug?.(`[${accountId}] MUC OMEMO: encrypting for ${occupantJids.length} occupants in ${roomJid}`);
+
+  if (getOmemoProtocol(accountId) === "v2" && hasOmemo2(accountId)) {
+    try {
+      return await encryptOmemo2(
+        accountId,
+        occupantJids.map(bareJid),
+        buildSceEnvelope(plaintext, roomJid),
+      );
+    } catch (err) {
+      log?.error?.(`[${accountId}] genuine OMEMO 2 MUC encryption failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
 
   try {
     // Collect all devices from all occupants
