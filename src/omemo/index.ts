@@ -1102,7 +1102,8 @@ export function buildOmemoMessageStanza(
     }),
     // Store hint for MAM
     xml("store", { xmlns: "urn:xmpp:hints" }),
-    // Fallback body for non-OMEMO clients
-    xml("body", {}, "I sent you an OMEMO encrypted message but your client doesn't seem to support that.")
+    // SCE explicitly forbids a plaintext <body/> fallback.  Keeping one on
+    // an OMEMO 2 stanza causes clients to treat the message as unencrypted
+    // and leaks the presence of a synthetic body to MAM/other clients.
   );
 }

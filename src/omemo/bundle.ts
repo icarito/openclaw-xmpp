@@ -34,13 +34,15 @@ export async function publishBundle(
   protocol: OmemoProtocol = "legacy"
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    // Build pre-key elements (legacy OMEMO format)
+    const isV2 = protocol === "v2";
+    // OMEMO 2 changed both the element names and the location of the
+    // pre-key id.  Gajim/Dino reject a v2 bundle containing legacy
+    // <preKeyPublic preKeyId=...> elements, even when the outer namespace
+    // is urn:xmpp:omemo:2.
     const preKeyElements = bundle.preKeys.map((pk) =>
-      xml("preKeyPublic", { preKeyId: String(pk.id) }, toBase64(pk.publicKey))
+      xml(isV2 ? "pk" : "preKeyPublic", isV2 ? { id: String(pk.id) } : { preKeyId: String(pk.id) }, toBase64(pk.publicKey))
     );
 
-    // Build bundle XML (legacy OMEMO format)
-    const isV2 = protocol === "v2";
     const payload = xml(
       "bundle",
       { xmlns: isV2 ? NS_OMEMO_V2 : NS_OMEMO },
