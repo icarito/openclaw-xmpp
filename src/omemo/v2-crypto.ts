@@ -7,11 +7,44 @@
  * wire, avoiding a generated runtime dependency.
  */
 import crypto from "node:crypto";
+import { WhisperMessage, PreKeyWhisperMessage } from "@privacyresearch/libsignal-protocol-protobuf-ts";
 
 const INFO = Buffer.from("OMEMO Payload", "utf8");
 const ZERO_SALT = Buffer.alloc(32);
 
 export type V2Payload = { key: Uint8Array; payload: Uint8Array };
+
+/**
+ * Extract the Double Ratchet header carried by a libsignal wire message.
+ * libsignal prefixes the protobuf with the version byte.  Pre-key messages
+ * wrap a WhisperMessage inside PreKeyWhisperMessage, while regular messages
+ * contain WhisperMessage directly.  This is intentionally kept separate
+ * from decryption: the public SessionCipher API only returns the plaintext,
+ * but OMEMO 2 needs n/pn/dh_pub in the authenticated payload.
+ */
+export function extractRatchetHeader(signalMessage: Uint8Array): RatchetHeader {
+  if (signalMessage.length < 2) throw new Error("Signal message is empty");
+  const version = signalMessage[0]!;
+  if ((version & 0x0f) > 3 || (version >> 4) < 3) {
+    throw new Error(`Unsupported Signal message version ${version}`);
+  }
+
+  let whisperBytes: Uint8Array;
+  if ((version & 0x0f) === 3) {
+    const preKey = PreKeyWhisperMessage.decode(signalMessage.slice(1));
+    whisperBytes = new Uint8Array(preKey.message);
+  } else {
+    // The first byte is the Signal wire-version prefix, not protobuf data.
+    whisperBytes = signalMessage.slice(1);
+  }
+  if (whisperBytes.length < 2) throw new Error("Signal WhisperMessage is truncated");
+  const message = WhisperMessage.decode(whisperBytes);
+  return {
+    n: message.counter >>> 0,
+    pn: message.previousCounter >>> 0,
+    dh_pub: new Uint8Array(message.ephemeralKey),
+  };
+}
 
 /** Return the bare form of a JID (the form required by OMEMO/SCE). */
 export function bareJid(jid: string): string {

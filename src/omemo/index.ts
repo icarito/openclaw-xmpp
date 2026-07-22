@@ -15,7 +15,7 @@ import { publishDeviceId, fetchDeviceList } from "./device.js";
 import { publishBundle, fetchBundle, buildBundleFromStore } from "./bundle.js";
 import { NS_OMEMO, NS_OMEMO_DEVICES, OMEMO_NAMESPACES, NS_OMEMO_LEGACY, NS_OMEMO_V2, type OmemoStoreData, type OmemoDevice, type OmemoProtocol } from "./types.js";
 import { loadOmemoStoreData, saveOmemoStoreData } from "./persistence.js";
-import { bareJid, decryptV2Payload, encryptV2Payload } from "./v2-crypto.js";
+import { bareJid, decryptV2Payload, encryptV2Payload, extractRatchetHeader, type RatchetHeader } from "./v2-crypto.js";
 import {
   getDeviceList,
   handleDeviceListPepEvent,
@@ -436,7 +436,7 @@ export async function decryptOmemoMessage(
     }
 
     // Decrypt the message key using Signal session
-    const messageKey = await decryptMessageKey(
+    const messageKeyResult = await decryptMessageKey(
       store,
       senderJid,
       senderDeviceId,
@@ -445,7 +445,7 @@ export async function decryptOmemoMessage(
       log
     );
 
-    if (!messageKey) {
+    if (!messageKeyResult) {
       log?.warn?.(`[${accountId}] OMEMO failed to decrypt message key`);
       return null;
     }
@@ -457,6 +457,10 @@ export async function decryptOmemoMessage(
     }
 
     // Decrypt payload with AES-GCM
+    const { key: messageKey, ratchetHeader } = messageKeyResult;
+    if (isV2 && ratchetHeader) {
+      log?.debug?.(`[${accountId}] OMEMO 2 Signal header n=${ratchetHeader.n} pn=${ratchetHeader.pn} dh_pub=${ratchetHeader.dh_pub.length} bytes`);
+    }
     const ciphertext = fromBase64(payloadText);
 
     log?.debug?.(`[${accountId}] OMEMO AES: ivLen=${iv.length}, keyLen=${messageKey.length}, ciphertextLen=${ciphertext.length}`);
@@ -490,7 +494,7 @@ async function decryptMessageKey(
   encryptedKey: Uint8Array,
   isPreKeyHint: boolean,
   log?: Logger
-): Promise<Uint8Array | null> {
+): Promise<{ key: Uint8Array; ratchetHeader?: RatchetHeader } | null> {
   const cipher = store.createSessionCipher(senderJid, senderDeviceId);
 
   // Properly convert Uint8Array to ArrayBuffer (handle potential byte offset)
@@ -498,6 +502,14 @@ async function decryptMessageKey(
     encryptedKey.byteOffset,
     encryptedKey.byteOffset + encryptedKey.byteLength
   ) as ArrayBuffer;
+  // Parse before handing the bytes to SessionCipher; the latter intentionally
+  // exposes only plaintext and drops the Signal ratchet header.
+  let ratchetHeader: RatchetHeader | undefined;
+  try {
+    ratchetHeader = extractRatchetHeader(encryptedKey);
+  } catch (err) {
+    log?.debug?.(`Signal ratchet header unavailable: ${err}`);
+  }
 
   log?.debug?.(`Signal decrypting: hintPreKey=${isPreKeyHint}, keyLen=${encryptedKey.length}, sender=${senderJid}:${senderDeviceId}`);
 
@@ -519,7 +531,7 @@ async function decryptMessageKey(
         // Pre-key message - establishes new session
         decrypted = await cipher.decryptPreKeyWhisperMessage(keyBuffer, "binary");
         log?.debug?.(`Signal pre-key decryption success: decryptedLen=${decrypted.byteLength}`);
-        return new Uint8Array(decrypted);
+        return { key: new Uint8Array(decrypted), ratchetHeader };
       } catch (preKeyErr) {
         log?.debug?.(`Signal pre-key attempt failed: ${preKeyErr}, trying regular...`);
         // Fall through to try regular message
@@ -528,13 +540,13 @@ async function decryptMessageKey(
       // Try as regular message
       decrypted = await cipher.decryptWhisperMessage(keyBuffer, "binary");
       log?.debug?.(`Signal regular decryption success (fallback): decryptedLen=${decrypted.byteLength}`);
-      return new Uint8Array(decrypted);
+      return { key: new Uint8Array(decrypted), ratchetHeader };
     } else {
       try {
         // Regular message - uses existing session
         decrypted = await cipher.decryptWhisperMessage(keyBuffer, "binary");
         log?.debug?.(`Signal regular decryption success: decryptedLen=${decrypted.byteLength}`);
-        return new Uint8Array(decrypted);
+        return { key: new Uint8Array(decrypted), ratchetHeader };
       } catch (regularErr) {
         log?.debug?.(`Signal regular attempt failed: ${regularErr}, trying pre-key...`);
         // Fall through to try pre-key message
@@ -543,7 +555,7 @@ async function decryptMessageKey(
       // Try as pre-key message
       decrypted = await cipher.decryptPreKeyWhisperMessage(keyBuffer, "binary");
       log?.debug?.(`Signal pre-key decryption success (fallback): decryptedLen=${decrypted.byteLength}`);
-      return new Uint8Array(decrypted);
+      return { key: new Uint8Array(decrypted), ratchetHeader };
     }
   } catch (err) {
     log?.debug?.(`Signal decryption failed both methods: ${err}`);
