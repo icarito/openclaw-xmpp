@@ -35,16 +35,20 @@ export function extractRatchetHeader(signalMessage: Uint8Array): RatchetHeader {
     throw new Error(`Unsupported Signal message version ${version}`);
   }
 
-  let whisperBytes: Uint8Array;
-  if ((version & 0x0f) === 3) {
+  let whisperBytes: Uint8Array | undefined;
+  // Both message kinds use version 0x33 in this libsignal release. Decode a
+  // pre-key wrapper opportunistically; regular WhisperMessage has no field 3
+  // (`message`) and therefore leaves this unset.
+  try {
     const preKey = PreKeyWhisperMessage.decode(signalMessage.slice(1));
-    whisperBytes = new Uint8Array(preKey.message);
-  } else {
-    // The first byte is the Signal wire-version prefix, not protobuf data.
-    whisperBytes = signalMessage.slice(1);
+    if (preKey.message?.length) whisperBytes = new Uint8Array(preKey.message);
+  } catch {
+    // Fall through to regular WhisperMessage below.
   }
-  if (whisperBytes.length < 2) throw new Error("Signal WhisperMessage is truncated");
-  const message = WhisperMessage.decode(whisperBytes);
+  if (!whisperBytes) whisperBytes = signalMessage;
+  if (whisperBytes.length < 10) throw new Error("Signal WhisperMessage is truncated");
+  const body = whisperBytes.slice(1, whisperBytes.length - 8);
+  const message = WhisperMessage.decode(body);
   return {
     n: message.counter >>> 0,
     pn: message.previousCounter >>> 0,
