@@ -26,6 +26,13 @@ import { startTelemetryLoop, type TelemetryLoopHandle } from "./telemetry.js";
 import type { RuntimeEnv } from "./runtime-api.js";
 import { getXmppRuntime } from "./runtime.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
+import {
+  initializeOmemo,
+  shutdownOmemo,
+  decryptOmemoMessage,
+  isOmemoEncrypted,
+  handleMucPresence,
+} from "./omemo/index.js";
 
 type XmppMonitorOptions = {
   accountId?: string;
@@ -243,6 +250,14 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
         telemetryLoop?.stop();
         telemetryLoop = startTelemetryLoop({ account, cfg, connection: onlineConnection, logger });
         logger.info(`[${account.accountId}] connected as ${jid}`);
+
+        if (account.config.omemo?.enabled) {
+          try {
+            await initializeOmemo(account.accountId, account.jid, account.config.omemo.deviceLabel, logger);
+          } catch (err) {
+            logger.error(`[${account.accountId}] OMEMO initialization failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         // Un turno que muere entre setTyping y clearTyping (rebound de sesión,
         // kill -9, restart del proceso) deja una presencia dnd/processing
         // dirigida (buildStatusPresence con `to=<peer>`) que el cliente del
@@ -309,6 +324,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     // here: several bot accounts may see each other's requests, and mirroring
     // subscribe stanzas from this handler can create a presence ping-pong.
     if (stanza.is("presence")) {
+      handleMucPresence(stanza, account.accountId, logger);
       const ptype = stanza.attrs.type;
       const from = stanza.attrs.from as string | undefined;
       if (!from || !connection) return;
@@ -328,18 +344,62 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     }
 
     if (!stanza.is("message")) return;
-    const type = stanza.attrs.type;
-    if (type !== "chat" && type !== "groupchat") return;
-    if (isStaleDelayedStanza(stanza)) {
-      logger.info(`[${account.accountId}] dropped stale delayed message from ${String(stanza.attrs.from)}`);
+
+    // XEP-0280 Carbons parsing
+    let realStanza = stanza;
+    let isCarbonCopy = false;
+
+    const received = stanza.getChild("received", "urn:xmpp:carbons:2");
+    const sent = stanza.getChild("sent", "urn:xmpp:carbons:2");
+
+    if (sent) {
+      logger.info(`[${account.accountId}] ignoring sent carbon copy`);
       return;
     }
 
-    const body = stanza.getChildText("body") || "";
-    const from = stanza.attrs.from as string | undefined;
+    if (received) {
+      const forwarded = received.getChild("forwarded", "urn:xmpp:forward:0");
+      const innerMsg = forwarded?.getChild("message");
+      if (innerMsg) {
+        realStanza = innerMsg;
+        isCarbonCopy = true;
+        logger.info(`[${account.accountId}] handling received carbon copy`);
+      }
+    }
+
+    const type = realStanza.attrs.type;
+    if (type !== "chat" && type !== "groupchat") return;
+    if (isStaleDelayedStanza(realStanza)) {
+      logger.info(`[${account.accountId}] dropped stale delayed message from ${String(realStanza.attrs.from)}`);
+      return;
+    }
+
+    let body = realStanza.getChildText("body") || "";
+    let wasEncrypted = false;
+
+    if (account.config.omemo?.enabled && isOmemoEncrypted(realStanza)) {
+      logger.debug?.(`[${account.accountId}] OMEMO encrypted message detected`);
+      try {
+        const decryptedBody = await decryptOmemoMessage(account.accountId, realStanza, logger);
+        if (decryptedBody) {
+          body = decryptedBody;
+          wasEncrypted = true;
+          logger.debug?.(`[${account.accountId}] OMEMO decrypted body successfully`);
+        } else {
+          logger.warn?.(`[${account.accountId}] OMEMO decryption returned null or failed`);
+        }
+      } catch (err) {
+        logger.error?.(`[${account.accountId}] OMEMO decryption error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (!account.config.omemo?.enabled && isOmemoEncrypted(realStanza)) {
+      logger.debug?.(`[${account.accountId}] OMEMO encrypted message ignored because OMEMO is disabled`);
+      return;
+    }
+
+    const from = realStanza.attrs.from as string | undefined;
     if (!from) return;
 
-    const oobUrl = extractOobUrl(stanza, body);
+    const oobUrl = extractOobUrl(realStanza, body);
     if (!body && !oobUrl) return; // chat states, receipts, etc.
 
     const platformId = bareJid(from);
@@ -351,7 +411,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       if (senderNick === botNick) return;
     }
 
-    const dedupeKeys = buildInboundDedupeKeys(stanza, type, platformId, body, oobUrl);
+    const dedupeKeys = buildInboundDedupeKeys(realStanza, type, platformId, body, oobUrl);
     if (dedupeKeys.some((key) => recentInbound.has(key))) {
       logger.info(`[${account.accountId}] dropped duplicate message from ${from}`);
       return;
@@ -363,15 +423,15 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     // XEP-0050 textual fallback (/nc ...) and pending-session interception,
     // plus /session commands -- all handled by commands.ts, never forwarded
     // to the agent.
-    if (body && commandRuntime.handleMessage(platformId, body, stanza)) return;
+    if (body && commandRuntime.handleMessage(platformId, body, realStanza)) return;
     if (commandRuntime.hasPending(platformId)) return;
 
     const senderNick = isGroup ? from.split("/")[1] : undefined;
-    const wasMentioned = isGroup ? messageMentionsBot(stanza, body, botNick, account.jid) : true;
-    const replyTo = extractReply(stanza) ?? undefined;
+    const wasMentioned = isGroup ? messageMentionsBot(realStanza, body, botNick, account.jid) : true;
+    const replyTo = extractReply(realStanza) ?? undefined;
 
     const message: XmppInboundMessage = {
-      messageId: (stanza.attrs.id as string) || makeXmppMessageId(),
+      messageId: (realStanza.attrs.id as string) || makeXmppMessageId(),
       target: platformId,
       rawFrom: from,
       senderJid: isGroup ? platformId : platformId,
@@ -382,6 +442,8 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       wasMentioned,
       replyTo,
       oobUrl: oobUrl ?? undefined,
+      isCarbonCopy,
+      wasEncrypted,
     };
 
     core.channel.activity.record({
@@ -430,6 +492,13 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       }
       telemetryLoop?.stop();
       telemetryLoop = null;
+
+      if (account.config.omemo?.enabled) {
+        shutdownOmemo(account.accountId, logger).catch((err) => {
+          logger.warn(`[${account.accountId}] OMEMO shutdown error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+
       if (nativeApprovalHandler && nativeApprovalHandlers.get(account.accountId) === nativeApprovalHandler) {
         nativeApprovalHandlers.delete(account.accountId);
       }
