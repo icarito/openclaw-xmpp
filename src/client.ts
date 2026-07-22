@@ -164,25 +164,16 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     enabled?: boolean;
     id?: string;
     inbound?: number;
-    on: (event: string, handler: (...args: unknown[]) => void) => void;
   } | undefined;
   const previousStreamId = lastStreamIds.get(account.accountId);
   const streamManagementConfig = account.config.streamManagement;
   const smEnabled = streamManagementConfig?.enabled !== false;
-  let wasResumed = false;
 
   if (sm) {
     sm.allowResume = smEnabled;
     if (streamManagementConfig?.resumptionMaxSeconds) {
       sm.preferredMaximum = streamManagementConfig.resumptionMaxSeconds;
     }
-    sm.on("resumed", () => {
-      wasResumed = true;
-      log.info?.(`[${account.accountId}] XEP-0198 stream resumed`);
-    });
-    sm.on("fail", (stanza) => {
-      log.warn?.(`[${account.accountId}] XEP-0198 stanza failed: ${String(stanza).slice(0, 120)}`);
-    });
   }
 
   xmpp.on("online", async () => {
@@ -192,9 +183,6 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     stopPing();
     pingTimer = setInterval(() => void sendPing(), PING_INTERVAL_MS);
     log.info?.(`XMPP channel connected as ${connectionLabel}`);
-    if (previousStreamId && !wasResumed) {
-      log.warn?.(`[${account.accountId}] XEP-0198 resume failed; started a new stream`);
-    }
     try {
       await xmpp.send(xml(
         "iq",
