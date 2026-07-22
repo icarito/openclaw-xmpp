@@ -23,12 +23,34 @@ import type { CoreConfig } from "./types.js";
 // cliente sin acercarse a los límites de rate de Prosody.
 const MIN_EDIT_INTERVAL_MS = 2500;
 
+const ACK_PLACEHOLDER_TEXT = "Recibido · preparando…";
+const NO_REPLY_PLACEHOLDER_TEXT = "Turno completado sin respuesta visible.";
+
 export type XmppProgressController = ReturnType<typeof createXmppProgressController>;
+
+// Guard defensivo, sólo-mismo-proceso: si createXmppProgressController se
+// invoca de nuevo para una sesión cuya burbuja anterior sigue viva (turno
+// reprocesado antes de que el anterior cerrara), reusar esa burbuja en vez
+// de abrir una nueva. Esto NO sobrevive a un reinicio del proceso -- ese
+// caso (reconexión XMPP tras restart, reentrega de stanza) lo cubre el
+// trabajo de XEP-0198 Stream Management en curso por separado; este guard
+// sólo evita el caso más barato y frecuente de reprocesamiento dentro del
+// mismo proceso.
+const LIVE_BUBBLES_KEY = "__openclawXmppLiveProgressBubbles";
+type LiveBubbleRegistry = Map<string, { progressMessageId: string; target: string }>;
+function liveBubbleRegistry(): LiveBubbleRegistry {
+  const g = globalThis as typeof globalThis & { [LIVE_BUBBLES_KEY]?: LiveBubbleRegistry };
+  if (!g[LIVE_BUBBLES_KEY]) g[LIVE_BUBBLES_KEY] = new Map();
+  return g[LIVE_BUBBLES_KEY]!;
+}
 
 export function createXmppProgressController(params: {
   cfg: CoreConfig;
   account: ResolvedXmppAccount;
   target: string;
+  /** Identidad de sesión/turno para el guard anti-reapertura (típicamente
+   * route.sessionKey). Sin esto el guard queda inerte. */
+  sessionKey?: string;
   log?: (line: string) => void;
 }) {
   const entry = params.account.config;
@@ -46,7 +68,17 @@ export function createXmppProgressController(params: {
   // entre tools. (La primera versión colapsaba y abría burbuja nueva en cada
   // respuesta intermedia → un modelo que narra entre cada tool generaba una
   // catarata de mensajes, exactamente lo que este feature quería evitar.)
-  let progressMessageId: string | null = null;
+  //
+  // Si esta invocación es un reprocesamiento del mismo turno mientras la
+  // burbuja anterior (mismo proceso) sigue viva, arrancar apuntando a esa
+  // burbuja en vez de null evita abrirla de nuevo (ver liveBubbleRegistry).
+  const sessionKey = params.sessionKey;
+  const liveBubble = sessionKey ? liveBubbleRegistry().get(sessionKey) : undefined;
+  let progressMessageId: string | null =
+    liveBubble && liveBubble.target === params.target ? liveBubble.progressMessageId : null;
+  if (progressMessageId) {
+    params.log?.(`[xmpp] progress: reusing live bubble ${progressMessageId} for session ${sessionKey}`);
+  }
   let lastSentText = "";
   let pendingText: string | null = null;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -87,6 +119,9 @@ export function createXmppProgressController(params: {
         // así que el parpadeo de presencia es breve y tolerable.
         const result = await sendMessageXmpp(params.target, text, sendOpts);
         progressMessageId = result.messageId;
+        if (sessionKey) {
+          liveBubbleRegistry().set(sessionKey, { progressMessageId, target: params.target });
+        }
       }
       lastSentText = text;
     } catch (error) {
@@ -140,17 +175,30 @@ export function createXmppProgressController(params: {
    * XEP-0308, so feedback does not add a second permanent message. */
   const start = async () => {
     if (!active || progressMessageId) return;
-    partialText = "Recibido · preparando…";
+    partialText = ACK_PLACEHOLDER_TEXT;
     queueRender();
     await closeWindow();
   };
 
+  /** true si la burbuja ya muestra algo más que el ack inicial: texto de
+   * respuesta real (handlePartialReply lo sobrescribe por completo, así
+   * que distinto del placeholder = contenido real) o líneas de tools. */
+  const hasSubstantiveContent = (): boolean =>
+    (partialText.trim() !== "" && partialText.trim() !== ACK_PLACEHOLDER_TEXT) ||
+    compositorText.trim() !== "";
+
   /** A visible turn may legitimately end without a reply payload (for
    * example, a tool-only agent turn). Never leave the acknowledgement or
-   * pending state hanging in that case. */
+   * pending state hanging in that case — but if the bubble already shows
+   * real agent content (e.g. the turn was force-aborted mid-response after
+   * a stuck approval), don't destroy it with the generic placeholder. */
   const finishWithoutReply = async () => {
     if (!active) return;
-    await finalizeWithFinalText("Turno completado sin respuesta visible.");
+    if (hasSubstantiveContent()) {
+      await closeWindow();
+      return;
+    }
+    await finalizeWithFinalText(NO_REPLY_PLACEHOLDER_TEXT);
   };
 
   /**
@@ -199,6 +247,9 @@ export function createXmppProgressController(params: {
       partialText = "";
       compositorText = "";
       toolsInTurn = 0;
+      if (sessionKey) {
+        liveBubbleRegistry().delete(sessionKey);
+      }
       compositor.markFinalReplyStarted();
       compositor.markFinalReplyDelivered();
       compositor.beginNewTurn();

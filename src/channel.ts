@@ -499,11 +499,11 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
     },
     actions: {
       describeMessageTool: () => ({
-        actions: ["send", "read"],
+        actions: ["send", "read", "upload-file"],
         capabilities: ["presentation"],
       }),
-      supportsAction: ({ action }) => action === "send" || action === "read",
-      resolveExecutionMode: ({ action }) => (action === "send" ? "gateway" : "local"),
+      supportsAction: ({ action }) => action === "send" || action === "read" || action === "upload-file",
+      resolveExecutionMode: ({ action }) => (action === "send" || action === "upload-file" ? "gateway" : "local"),
       isToolDeliveryAction: ({ args }) =>
         Boolean(readFirstString(args, ["target", "to", "channelId", "chatId"])),
       handleAction: async ({ action, params, cfg, accountId, mediaAccess, mediaLocalRoots, mediaReadFile }) => {
@@ -519,7 +519,7 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
             details: {},
           };
         }
-        if (action !== "send") {
+        if (action !== "send" && action !== "upload-file") {
           throw new Error(`XMPP action ${action} not supported`);
         }
         const target = readFirstString(params, ["target", "to", "channelId", "chatId"]);
@@ -528,38 +528,52 @@ export const xmppPlugin: ChannelPlugin<ResolvedXmppAccount, XmppProbe> = createC
         }
         const message = readFirstString(params, ["message", "text", "content", "caption"]);
         const mediaUrl = readFirstString(params, ["media", "mediaUrl", "path", "filePath", "fileUrl"]);
+        if (action === "upload-file" && !mediaUrl) {
+          throw new Error("XMPP upload-file requires media, mediaUrl, path, filePath or fileUrl.");
+        }
         const presentation = readObjectParam(params, "presentation");
         const interactive = readObjectParam(params, "interactive");
         const channelData = readObjectParam(params, "channelData");
         const runtime = await loadXmppChannelRuntime();
+        // upload-file siempre pasa por sendFileXmpp (XEP-0363 HTTP Upload
+        // real): a diferencia de "send", nunca cae a mensaje de texto plano
+        // ni a payload -- el punto de la acción es subir un archivo.
         const result =
-          presentation || interactive || channelData
-            ? await runtime.sendPayloadXmpp(
-                target,
-                message,
-                {
-                  text: message,
-                  ...(presentation ? { presentation: presentation as never } : {}),
-                  ...(interactive ? { interactive: interactive as never } : {}),
-                  ...(channelData ? { channelData } : {}),
-                },
-                {
-                  cfg: cfg as CoreConfig,
-                  accountId: accountId ?? undefined,
-                },
-              )
-            : mediaUrl
-              ? await runtime.sendFileXmpp(target, message, mediaUrl, {
-                  cfg: cfg as CoreConfig,
-                  accountId: accountId ?? undefined,
-                  ...(mediaAccess !== undefined ? { mediaAccess } : {}),
-                  ...(mediaLocalRoots !== undefined ? { mediaLocalRoots } : {}),
-                  ...(mediaReadFile !== undefined ? { mediaReadFile } : {}),
-                })
-              : await runtime.sendMessageXmpp(target, message, {
-                  cfg: cfg as CoreConfig,
-                  accountId: accountId ?? undefined,
-                });
+          action === "upload-file"
+            ? await runtime.sendFileXmpp(target, message, mediaUrl!, {
+                cfg: cfg as CoreConfig,
+                accountId: accountId ?? undefined,
+                ...(mediaAccess !== undefined ? { mediaAccess } : {}),
+                ...(mediaLocalRoots !== undefined ? { mediaLocalRoots } : {}),
+                ...(mediaReadFile !== undefined ? { mediaReadFile } : {}),
+              })
+            : presentation || interactive || channelData
+              ? await runtime.sendPayloadXmpp(
+                  target,
+                  message,
+                  {
+                    text: message,
+                    ...(presentation ? { presentation: presentation as never } : {}),
+                    ...(interactive ? { interactive: interactive as never } : {}),
+                    ...(channelData ? { channelData } : {}),
+                  },
+                  {
+                    cfg: cfg as CoreConfig,
+                    accountId: accountId ?? undefined,
+                  },
+                )
+              : mediaUrl
+                ? await runtime.sendFileXmpp(target, message, mediaUrl, {
+                    cfg: cfg as CoreConfig,
+                    accountId: accountId ?? undefined,
+                    ...(mediaAccess !== undefined ? { mediaAccess } : {}),
+                    ...(mediaLocalRoots !== undefined ? { mediaLocalRoots } : {}),
+                    ...(mediaReadFile !== undefined ? { mediaReadFile } : {}),
+                  })
+                : await runtime.sendMessageXmpp(target, message, {
+                    cfg: cfg as CoreConfig,
+                    accountId: accountId ?? undefined,
+                  });
         return {
           content: [
             {

@@ -489,6 +489,7 @@ export async function handleXmppInbound(params: {
     cfg: config,
     account,
     target: peerId,
+    sessionKey: route.sessionKey,
     log: (line) => runtime.log?.(line),
   });
   await progress.start();
