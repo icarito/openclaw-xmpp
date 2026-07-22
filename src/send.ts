@@ -794,6 +794,12 @@ export async function sendEditXmpp(
     throw new Error(`XMPP account "${account.accountId}" has no active connection.`);
   }
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
+  // Streaming edits used to send a bare plaintext <body/> and therefore
+  // bypassed OMEMO entirely.  In encrypted mode prefer a new encrypted
+  // stanza; preserving XEP-0308 replacement would otherwise leak the update.
+  if (account.config.omemo?.enabled) {
+    return sendMessageXmpp(to, plain, opts);
+  }
   const id = nextStanzaId();
   const body = plain.length > XMPP_MAX_BODY ? splitForLimit(plain, XMPP_MAX_BODY)[0]! : plain;
   await connection.send(
