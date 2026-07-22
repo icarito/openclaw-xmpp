@@ -15,7 +15,7 @@ import { publishDeviceId, fetchDeviceList } from "./device.js";
 import { publishBundle, fetchBundle, buildBundleFromStore } from "./bundle.js";
 import { NS_OMEMO, NS_OMEMO_DEVICES, OMEMO_NAMESPACES, NS_OMEMO_LEGACY, NS_OMEMO_V2, type OmemoStoreData, type OmemoDevice, type OmemoProtocol } from "./types.js";
 import { loadOmemoStoreData, saveOmemoStoreData } from "./persistence.js";
-import { bareJid, decryptV2Payload, encryptV2Payload } from "./v2-crypto.js";
+import { bareJid, decryptV2Payload, encryptV2Payload, withRatchetHeader, type RatchetHeader } from "./v2-crypto.js";
 import {
   getDeviceList,
   handleDeviceListPepEvent,
@@ -682,6 +682,7 @@ export async function encryptOmemoMessage(
 
     // Encrypt message key for each recipient device
     const keyElements: Element[] = [];
+    let ratchetHeader: RatchetHeader | undefined;
 
     for (const device of devices) {
       try {
@@ -694,6 +695,7 @@ export async function encryptOmemoMessage(
           log
         );
         if (result) {
+          if (isV2 && !ratchetHeader) ratchetHeader = result.ratchetHeader;
           keyElements.push(
             xml(
               "key",
@@ -720,6 +722,7 @@ export async function encryptOmemoMessage(
           log
         );
         if (result) {
+          if (isV2 && !ratchetHeader) ratchetHeader = result.ratchetHeader;
           keyElements.push(
             xml(
               "key",
@@ -737,6 +740,10 @@ export async function encryptOmemoMessage(
     if (keyElements.length === 0) {
       log?.error?.(`[${accountId}] Could not encrypt for any device of ${recipientJid}`);
       return null;
+    }
+
+    if (isV2 && ratchetHeader && v2Payload) {
+      v2Payload.payload = withRatchetHeader(v2Payload.payload, ratchetHeader);
     }
 
     // Build OMEMO message
@@ -842,6 +849,7 @@ export async function encryptMucOmemoMessage(
 
     // Encrypt message key for each occupant device
     const keyElements: Element[] = [];
+    let ratchetHeader: RatchetHeader | undefined;
 
     for (const { jid, deviceId } of allDevices) {
       try {
@@ -854,6 +862,7 @@ export async function encryptMucOmemoMessage(
           log
         );
         if (result) {
+          if (isV2 && !ratchetHeader) ratchetHeader = result.ratchetHeader;
           keyElements.push(
             xml(
               "key",
@@ -883,6 +892,7 @@ export async function encryptMucOmemoMessage(
           log
         );
         if (result) {
+          if (isV2 && !ratchetHeader) ratchetHeader = result.ratchetHeader;
           keyElements.push(
             xml(
               "key",
@@ -903,6 +913,10 @@ export async function encryptMucOmemoMessage(
     if (keyElements.length === 0) {
       log?.error?.(`[${accountId}] Could not encrypt for any device in room ${roomJid}`);
       return null;
+    }
+
+    if (isV2 && ratchetHeader && v2Payload) {
+      v2Payload.payload = withRatchetHeader(v2Payload.payload, ratchetHeader);
     }
 
     // Build OMEMO message
@@ -931,7 +945,7 @@ async function encryptKeyForDevice(
   deviceId: number,
   messageKey: Uint8Array,
   log?: Logger
-): Promise<{ encryptedKey: Uint8Array; isPreKey: boolean } | null> {
+): Promise<{ encryptedKey: Uint8Array; isPreKey: boolean; ratchetHeader?: RatchetHeader } | null> {
   // Use the account's own JID if recipientJid is empty (self)
   // store.getSelfJid() returns the real JID (e.g., aurora@sazsxm.com)
   const targetJid = recipientJid || store.getSelfJid() || accountId;
@@ -1001,9 +1015,29 @@ async function encryptKeyForDevice(
     return null;
   }
 
+  let ratchetHeader: RatchetHeader | undefined;
+  try {
+    const proto = await import("@privacyresearch/libsignal-protocol-protobuf-ts");
+    const body = encryptedKeyBytes;
+    const decodeWhisper = (bytes: Uint8Array): RatchetHeader => {
+      const msg = proto.WhisperMessage.decode(bytes);
+      return { n: msg.counter >>> 0, pn: msg.previousCounter >>> 0, dh_pub: new Uint8Array(msg.ephemeralKey) };
+    };
+    if (encrypted.type === 3) {
+      const pre = proto.PreKeyWhisperMessage.decode(body.slice(1));
+      const nested = new Uint8Array(pre.message);
+      ratchetHeader = decodeWhisper(nested.slice(1, -8));
+    } else {
+      ratchetHeader = decodeWhisper(body.slice(1, -8));
+    }
+  } catch (err) {
+    log?.debug?.(`[OMEMO] unable to extract ratchet header: ${err}`);
+  }
+
   return {
     encryptedKey: encryptedKeyBytes,
     isPreKey: encrypted.type === 3, // PreKeyWhisperMessage type
+    ratchetHeader,
   };
 }
 
