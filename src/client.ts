@@ -18,6 +18,10 @@ import type { Element } from "@xmpp/xml";
 
 import type { ResolvedXmppAccount } from "./accounts.js";
 
+// Maps for tracking stream management state across client reconnections/restarts
+const lastStreamIds = new Map<string, string>();
+const lastInboundCounts = new Map<string, number>();
+
 export type XmppInboundStanzaEvent = {
   stanza: Element;
 };
@@ -153,6 +157,21 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     }
   };
 
+  let wasResumed = false;
+  const sm = (xmpp as any).streamManagement;
+  if (sm) {
+    sm.on("resumed", () => {
+      wasResumed = true;
+      log.info?.(`[${account.accountId}] XEP-0198 Stream Management: session resumed`);
+    });
+    sm.on("fail", (stanza: any) => {
+      log.warn?.(`[${account.accountId}] XEP-0198 Stream Management: stanza failed to send: ${stanza?.toString()?.slice(0, 100)}`);
+    });
+    sm.on("ack", () => {
+      log.debug?.(`[${account.accountId}] XEP-0198 Stream Management: stanza acknowledged`);
+    });
+  }
+
   xmpp.on("online", async () => {
     connected = true;
     backoffMs = BACKOFF_BASE_MS;
@@ -160,6 +179,28 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     stopPing();
     pingTimer = setInterval(() => void sendPing(), PING_INTERVAL_MS);
     log.info?.(`XMPP channel connected as ${connectionLabel}`);
+
+    if (previousStreamId && !wasResumed) {
+      log.warn?.(`[${account.accountId}] XMPP stream resumption failed — started normal session`);
+    }
+
+    // Enable XEP-0280 Message Carbons
+    try {
+      const enableCarbons = xml(
+        "iq",
+        { type: "set", id: `carbons-${Date.now()}` },
+        xml("enable", { xmlns: "urn:xmpp:carbons:2" })
+      );
+      await xmpp.send(enableCarbons);
+      log.info?.(`[${account.accountId}] XEP-0280 Message Carbons enabled`);
+    } catch (err) {
+      log.warn?.(`[${account.accountId}] Failed to enable carbons: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (sm && sm.enabled && sm.id) {
+      lastStreamIds.set(account.accountId, sm.id);
+    }
+
     // NOTE(xmpp-migration): pass `connection` (constructed below, before
     // `xmpp.start()`) rather than relying on the caller's own
     // `await connectXmppClient(...)` return value — @xmpp/client can emit
@@ -179,6 +220,9 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
 
   if (options.onStanza) {
     xmpp.on("stanza", (stanza: Element) => {
+      if (sm) {
+        lastInboundCounts.set(account.accountId, sm.inbound);
+      }
       options.onStanza?.(stanza);
     });
   }
@@ -235,7 +279,38 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     },
   };
 
-  await xmpp.start();
+  const previousStreamId = lastStreamIds.get(account.accountId);
+  const streamManagementConfig = account.config.streamManagement;
+  const smEnabled = streamManagementConfig?.enabled !== false;
+
+  if (sm) {
+    sm.allowResume = smEnabled;
+    if (streamManagementConfig?.resumptionMaxSeconds) {
+      sm.preferredMaximum = streamManagementConfig.resumptionMaxSeconds;
+    }
+  }
+
+  // Define resume on xmpp instance
+  (xmpp as any).resume = async (prevId: string) => {
+    log.info?.(`Attempting to resume previous stream: ${prevId}`);
+    if (sm) {
+      sm.id = prevId;
+      sm.inbound = lastInboundCounts.get(account.accountId) || 0;
+    }
+    await xmpp.start();
+  };
+
+  if (smEnabled && previousStreamId) {
+    try {
+      await (xmpp as any).resume(previousStreamId);
+    } catch (err) {
+      log.warn?.(`Resume attempt failed: ${err instanceof Error ? err.message : String(err)}, starting normal connection...`);
+      if (sm) sm.id = "";
+      await xmpp.start();
+    }
+  } else {
+    await xmpp.start();
+  }
 
   return connection;
 }
