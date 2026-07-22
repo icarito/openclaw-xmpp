@@ -18,6 +18,11 @@ import type { Element } from "@xmpp/xml";
 
 import type { ResolvedXmppAccount } from "./accounts.js";
 
+// @xmpp/stream-management clears its resumable id on offline. Keep the last
+// id outside the client instance so a supervised reconnect can resume it.
+const lastStreamIds = new Map<string, string>();
+const lastInboundCounts = new Map<string, number>();
+
 export type XmppInboundStanzaEvent = {
   stanza: Element;
 };
@@ -43,7 +48,7 @@ export type XmppConnection = {
   xmpp: Client;
   isConnected: () => boolean;
   send: (stanza: Element) => Promise<void>;
-  joinRoom: (roomBareJid: string, nick: string) => void;
+  joinRoom: (roomBareJid: string, nick: string) => Promise<void>;
   stop: () => Promise<void>;
 };
 
@@ -109,20 +114,28 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
   });
 
   const botNick = localpart;
+  const mucJoinPresence = (roomBareJid: string, nick: string) =>
+    xml(
+      "presence",
+      { to: `${roomBareJid}/${nick}` },
+      xml("x", { xmlns: "http://jabber.org/protocol/muc" }),
+    );
 
-  const rejoinRooms = (): void => {
+  const rejoinRooms = async (): Promise<void> => {
     for (const room of joinedRooms) {
-      xmpp.send(xml("presence", { to: `${room}/${botNick}` })).catch(() => {});
+      await xmpp.send(mucJoinPresence(room, botNick));
+      log.info?.(`XMPP joined MUC room ${room} as ${botNick}`);
     }
     if (joinedRooms.size > 0) {
       log.info?.(`XMPP rejoined ${joinedRooms.size} MUC room(s)`);
     }
   };
 
-  const joinRoom = (roomBareJid: string, nick: string): void => {
+  const joinRoom = async (roomBareJid: string, nick: string): Promise<void> => {
     joinedRooms.add(roomBareJid);
     if (connected) {
-      xmpp.send(xml("presence", { to: `${roomBareJid}/${nick}` })).catch(() => {});
+      await xmpp.send(mucJoinPresence(roomBareJid, nick));
+      log.info?.(`XMPP joined MUC room ${roomBareJid} as ${nick}`);
     }
   };
 
@@ -153,13 +166,48 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     }
   };
 
+  const sm = (xmpp as any).streamManagement as {
+    allowResume?: boolean;
+    preferredMaximum?: number | null;
+    enabled?: boolean;
+    id?: string;
+    inbound?: number;
+  } | undefined;
+  const previousStreamId = lastStreamIds.get(account.accountId);
+  const streamManagementConfig = account.config.streamManagement;
+  const smEnabled = streamManagementConfig?.enabled !== false;
+
+  if (sm) {
+    sm.allowResume = smEnabled;
+    if (streamManagementConfig?.resumptionMaxSeconds) {
+      sm.preferredMaximum = streamManagementConfig.resumptionMaxSeconds;
+    }
+  }
+
   xmpp.on("online", async () => {
     connected = true;
     backoffMs = BACKOFF_BASE_MS;
-    rejoinRooms();
+    try {
+      await rejoinRooms();
+    } catch (err) {
+      log.error?.(`XMPP MUC join failed: ${String(err)}`);
+      await xmpp.disconnect().catch(() => {});
+      return;
+    }
     stopPing();
     pingTimer = setInterval(() => void sendPing(), PING_INTERVAL_MS);
     log.info?.(`XMPP channel connected as ${connectionLabel}`);
+    try {
+      await xmpp.send(xml(
+        "iq",
+        { type: "set", id: `carbons-${Date.now()}` },
+        xml("enable", { xmlns: "urn:xmpp:carbons:2" }),
+      ));
+      log.info?.(`[${account.accountId}] XEP-0280 message carbons enabled`);
+    } catch (err) {
+      log.warn?.(`[${account.accountId}] XEP-0280 unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (sm?.enabled && sm.id) lastStreamIds.set(account.accountId, sm.id);
     // NOTE(xmpp-migration): pass `connection` (constructed below, before
     // `xmpp.start()`) rather than relying on the caller's own
     // `await connectXmppClient(...)` return value — @xmpp/client can emit
@@ -179,6 +227,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
 
   if (options.onStanza) {
     xmpp.on("stanza", (stanza: Element) => {
+      if (sm?.inbound !== undefined) lastInboundCounts.set(account.accountId, sm.inbound);
       options.onStanza?.(stanza);
     });
   }
@@ -235,6 +284,10 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     },
   };
 
+  if (smEnabled && previousStreamId && sm) {
+    sm.id = previousStreamId;
+    sm.inbound = lastInboundCounts.get(account.accountId) ?? 0;
+  }
   await xmpp.start();
 
   return connection;

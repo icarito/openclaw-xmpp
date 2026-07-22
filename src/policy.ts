@@ -1,17 +1,14 @@
 // Xmpp plugin module implements policy behavior.
-import {
-  resolveScopeKeyCaseInsensitive,
-  resolveScopeRequireMention,
-  resolveScopeToolsPolicy,
-  type GroupToolPolicyConfig,
-  type ScopeTree,
-} from "openclaw/plugin-sdk/channel-policy";
 import type { XmppChannelConfig } from "./types.js";
 
+type GroupToolPolicyConfig = NonNullable<XmppChannelConfig["tools"]>;
+type ScopeEntry = Pick<XmppChannelConfig, "requireMention" | "tools">;
+type ScopeTree = {
+  defaults?: ScopeEntry;
+  scopes?: Record<string, ScopeEntry>;
+};
+
 function resolveKey(tree: ScopeTree, target: string): string | null {
-  if (typeof resolveScopeKeyCaseInsensitive === "function") {
-    return resolveScopeKeyCaseInsensitive(tree, target);
-  }
   const lower = target.toLowerCase();
   for (const key of Object.keys(tree.scopes ?? {})) {
     if (key.toLowerCase() === lower) return key;
@@ -43,6 +40,11 @@ function resolveXmppGroupScope(params: {
   return { tree, path: key ? [key] : [] };
 }
 
+function resolveRequireMention(tree: ScopeTree, path: string[]): boolean {
+  const scoped = path[0] ? tree.scopes?.[path[0]] : undefined;
+  return scoped?.requireMention ?? tree.defaults?.requireMention ?? true;
+}
+
 export function resolveXmppGroupMatch(params: {
   groups?: Record<string, XmppChannelConfig>;
   target: string;
@@ -64,7 +66,7 @@ export function resolveXmppGroupRequireMention(params: {
   target: string;
 }): boolean {
   const { tree, path } = resolveXmppGroupScope(params);
-  return resolveScopeRequireMention({ tree, path });
+  return resolveRequireMention(tree, path);
 }
 
 export function resolveXmppGroupToolPolicy(params: {
@@ -72,5 +74,6 @@ export function resolveXmppGroupToolPolicy(params: {
   target: string;
 }): GroupToolPolicyConfig | undefined {
   const { tree, path } = resolveXmppGroupScope(params);
-  return resolveScopeToolsPolicy({ tree, path });
+  const scoped = path[0] ? tree.scopes?.[path[0]] : undefined;
+  return scoped?.tools ?? tree.defaults?.tools;
 }

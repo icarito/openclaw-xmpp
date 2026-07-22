@@ -297,10 +297,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     }
     connection = nextConnection;
 
-    // Auto-join configured MUC rooms now that the connection is live.
-    for (const room of account.mucRooms) {
-      connection.joinRoom(room, botNick);
-    }
+    // connectXmppClient owns MUC rejoin before it reports the account online.
   }
 
   async function handleStanza(stanza: Element, commandRuntime: XmppCommandRuntime): Promise<void> {
@@ -328,18 +325,38 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     }
 
     if (!stanza.is("message")) return;
-    const type = stanza.attrs.type;
+    // XEP-0280 wraps messages sent from another resource in <received/>.
+    // Sent carbons were already handled by the originating resource.
+    let realStanza = stanza;
+    let isCarbonCopy = false;
+    if (stanza.getChild("sent", "urn:xmpp:carbons:2")) return;
+    const received = stanza.getChild("received", "urn:xmpp:carbons:2");
+    if (received) {
+      const forwarded = received.getChild("forwarded", "urn:xmpp:forward:0");
+      const inner = forwarded?.getChild("message");
+      if (inner) {
+        realStanza = inner;
+        isCarbonCopy = true;
+      }
+    }
+
+    const type = realStanza.attrs.type;
     if (type !== "chat" && type !== "groupchat") return;
-    if (isStaleDelayedStanza(stanza)) {
-      logger.info(`[${account.accountId}] dropped stale delayed message from ${String(stanza.attrs.from)}`);
+    if (isStaleDelayedStanza(realStanza)) {
+      logger.info(`[${account.accountId}] dropped stale delayed message from ${String(realStanza.attrs.from)}`);
       return;
     }
 
-    const body = stanza.getChildText("body") || "";
-    const from = stanza.attrs.from as string | undefined;
+    const body = realStanza.getChildText("body") || "";
+    const from = realStanza.attrs.from as string | undefined;
     if (!from) return;
 
-    const oobUrl = extractOobUrl(stanza, body);
+    const oobUrl = extractOobUrl(realStanza, body);
+    if (type === "groupchat") {
+      logger.info(
+        `[${account.accountId}] inbound MUC stanza from ${from} body=${body ? "present" : "empty"} oob=${oobUrl ? "present" : "absent"}`,
+      );
+    }
     if (!body && !oobUrl) return; // chat states, receipts, etc.
 
     const platformId = bareJid(from);
@@ -351,7 +368,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       if (senderNick === botNick) return;
     }
 
-    const dedupeKeys = buildInboundDedupeKeys(stanza, type, platformId, body, oobUrl);
+    const dedupeKeys = buildInboundDedupeKeys(realStanza, type, platformId, body, oobUrl);
     if (dedupeKeys.some((key) => recentInbound.has(key))) {
       logger.info(`[${account.accountId}] dropped duplicate message from ${from}`);
       return;
@@ -363,15 +380,15 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     // XEP-0050 textual fallback (/nc ...) and pending-session interception,
     // plus /session commands -- all handled by commands.ts, never forwarded
     // to the agent.
-    if (body && commandRuntime.handleMessage(platformId, body, stanza)) return;
+    if (body && commandRuntime.handleMessage(platformId, body, realStanza)) return;
     if (commandRuntime.hasPending(platformId)) return;
 
     const senderNick = isGroup ? from.split("/")[1] : undefined;
-    const wasMentioned = isGroup ? messageMentionsBot(stanza, body, botNick, account.jid) : true;
-    const replyTo = extractReply(stanza) ?? undefined;
+    const wasMentioned = isGroup ? messageMentionsBot(realStanza, body, botNick, account.jid) : true;
+    const replyTo = extractReply(realStanza) ?? undefined;
 
     const message: XmppInboundMessage = {
-      messageId: (stanza.attrs.id as string) || makeXmppMessageId(),
+      messageId: (realStanza.attrs.id as string) || makeXmppMessageId(),
       target: platformId,
       rawFrom: from,
       senderJid: isGroup ? platformId : platformId,
@@ -382,6 +399,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       wasMentioned,
       replyTo,
       oobUrl: oobUrl ?? undefined,
+      isCarbonCopy,
     };
 
     core.channel.activity.record({

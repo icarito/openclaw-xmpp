@@ -345,7 +345,7 @@ export async function sendMessageXmpp(
       xmpp: transient,
       isConnected: () => true,
       send: async (stanza) => { await transient.send(stanza); },
-      joinRoom: () => {},
+      joinRoom: async () => {},
       stop: async () => { await transient.stop(); },
     };
     transientCleanup = async () => { await transient.stop(); };
