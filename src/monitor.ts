@@ -21,6 +21,7 @@ import { handleXmppInbound } from "./inbound.js";
 import { bareJid, isGroupJid } from "./normalize.js";
 import { extractOobUrl, extractReply, isStaleDelayedStanza, makeXmppMessageId, messageMentionsBot } from "./protocol.js";
 import { registerXmppCommands, type XmppCommandRuntime } from "./commands.js";
+import { sendMessageXmpp } from "./send.js";
 import { resolveInlineButtonsScope } from "./outbound-render.js";
 import { startTelemetryLoop, type TelemetryLoopHandle } from "./telemetry.js";
 import type { RuntimeEnv } from "./runtime-api.js";
@@ -452,13 +453,19 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       return;
     }
 
-    await handleXmppInbound({
+      await handleXmppInbound({
       message,
       account,
       config: cfg,
       runtime,
       sendReply: async (target, text) => {
-        sendPlain(target, text);
+        // Normal replies (including streaming updates/finals) must use the
+        // OMEMO-aware outbound path. sendPlain is reserved for XEP-0050
+        // command/runtime fallbacks; using it here leaks plaintext stanzas.
+        await sendMessageXmpp(target, text, {
+          cfg,
+          accountId: account.accountId,
+        });
         opts.statusSink?.({ lastOutboundAt: Date.now() });
         core.channel.activity.record({
           channel: "xmpp",
