@@ -39,9 +39,12 @@ export function saveOmemoStoreData(accountId: string, data: OmemoStoreData, log?
     const storePath = getOmemoStorePath(accountId);
     const dir = path.dirname(storePath);
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
-    fs.writeFileSync(storePath, JSON.stringify(data, null, 2), "utf-8");
+    // The store contains identity private keys and Signal sessions. Keep it
+    // readable only by the gateway user even when the process umask is lax.
+    fs.writeFileSync(storePath, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o600 });
+    fs.chmodSync(storePath, 0o600);
     log?.debug?.(`[OMEMO] Saved persisted store`);
   } catch (err) {
     log?.error?.(`[OMEMO] Failed to save persisted store: ${err instanceof Error ? err.message : String(err)}`);
