@@ -84,6 +84,12 @@ const omemoStores = new Map<string, OmemoStore>();
 /** Accounts with OMEMO enabled */
 const omemoEnabled = new Set<string>();
 const omemoProtocols = new Map<string, OmemoProtocol>();
+/** Reply using the protocol of the most recent successfully decrypted DM. */
+const recentInboundProtocols = new Map<string, OmemoProtocol>();
+
+function inboundProtocolKey(accountId: string, jid: string): string {
+  return `${accountId}\0${bareJid(jid)}`;
+}
 
 // =============================================================================
 // INITIALIZATION
@@ -269,6 +275,9 @@ export async function shutdownOmemo(accountId: string, log?: Logger): Promise<vo
   omemoStores.delete(accountId);
   omemoEnabled.delete(accountId);
   omemoProtocols.delete(accountId);
+  for (const key of recentInboundProtocols.keys()) {
+    if (key.startsWith(`${accountId}\0`)) recentInboundProtocols.delete(key);
+  }
   log?.debug?.(`[${accountId}] OMEMO shutdown`);
 }
 
@@ -383,7 +392,9 @@ export async function decryptOmemoMessage(
     }
     try {
       const payload = await decryptOmemo2(accountId, senderJid, encrypted);
-      return payload === null ? null : unwrapScePayload(payload);
+      if (payload === null) return null;
+      recentInboundProtocols.set(inboundProtocolKey(accountId, senderJid), "v2");
+      return unwrapScePayload(payload);
     } catch (err) {
       log?.error?.(`[${accountId}] genuine OMEMO 2 decryption failed: ${err instanceof Error ? err.message : String(err)}`);
       return null;
@@ -514,6 +525,10 @@ export async function decryptOmemoMessage(
     const plaintext = isV2 ? unwrapScePayload(decryptedPayload) : decryptedPayload;
 
     log?.debug?.(`[${accountId}] OMEMO decrypted message from ${senderJid}:${senderDeviceId}`);
+    recentInboundProtocols.set(
+      inboundProtocolKey(accountId, senderJid),
+      isV2 ? "v2" : "legacy",
+    );
     return plaintext;
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
@@ -711,9 +726,21 @@ export async function encryptOmemoMessage(
     let selectedProtocol: OmemoProtocol = configuredProtocol === "dual" ? "legacy" : configuredProtocol;
     let devices = await getDeviceList(accountId, recipientJid, refreshDevices, log);
     if (configuredProtocol === "dual") {
-      const v2Devices = await fetchDeviceList(accountId, recipientJid, log, "v2");
-      if (v2Devices.length > 0) { selectedProtocol = "v2"; devices = v2Devices; }
-      else devices = await fetchDeviceList(accountId, recipientJid, log, "legacy");
+      const preferred = recentInboundProtocols.get(
+        inboundProtocolKey(accountId, recipientJid),
+      );
+      if (preferred === "legacy") {
+        devices = await fetchDeviceList(accountId, recipientJid, log, "legacy");
+        selectedProtocol = "legacy";
+      } else {
+        const v2Devices = await fetchDeviceList(accountId, recipientJid, log, "v2");
+        if (v2Devices.length > 0) {
+          selectedProtocol = "v2";
+          devices = v2Devices;
+        } else {
+          devices = await fetchDeviceList(accountId, recipientJid, log, "legacy");
+        }
+      }
     }
     if (devices.length === 0) {
       log?.warn?.(`[${accountId}] No OMEMO devices for ${recipientJid}`);
