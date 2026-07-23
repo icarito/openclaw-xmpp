@@ -794,14 +794,53 @@ export async function sendEditXmpp(
     throw new Error(`XMPP account "${account.accountId}" has no active connection.`);
   }
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
-  // Streaming edits used to send a bare plaintext <body/> and therefore
-  // bypassed OMEMO entirely.  In encrypted mode prefer a new encrypted
-  // stanza; preserving XEP-0308 replacement would otherwise leak the update.
-  if (account.config.omemo?.enabled) {
-    return sendMessageXmpp(to, plain, opts);
-  }
   const id = nextStanzaId();
   const body = plain.length > XMPP_MAX_BODY ? splitForLimit(plain, XMPP_MAX_BODY)[0]! : plain;
+
+  // Keep the XEP-0308 correlation on the outer stanza while encrypting only
+  // the edited body. <replace/> exposes the stanza id being corrected, not
+  // the message text; dropping it turns every streaming update into a new
+  // bubble in Gajim, Dino and gtk-llm-chat.
+  if (account.config.omemo?.enabled) {
+    const logger = getXmppRuntime().logging.getChildLogger({
+      channel: "xmpp",
+      accountId: account.accountId,
+    });
+    let encryptedElement: Element | null = null;
+    if (type === "groupchat") {
+      if (isRoomOmemoCapable(account.accountId, target)) {
+        encryptedElement = await encryptMucOmemoMessage(account.accountId, target, body, logger);
+      } else {
+        logger.warn(`[${account.accountId}] OMEMO MUC edit fallback: room ${target} is not OMEMO-capable`);
+      }
+    } else {
+      encryptedElement = await encryptOmemoMessage(account.accountId, target, body, logger);
+      if (!encryptedElement) {
+        logger.warn(`[${account.accountId}] OMEMO edit fallback: recipient ${target} has no compatible devices`);
+      }
+    }
+
+    if (encryptedElement) {
+      const stanza = buildOmemoMessageStanza(target, encryptedElement, type, {
+        replaceId: editTargetId,
+        ephemeral: opts.ephemeral,
+      });
+      stanza.attrs.id = id;
+      await connection.send(stanza);
+      recordXmppOutboundActivity(account.accountId);
+      return {
+        messageId: id,
+        target,
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [{ channel: "xmpp", messageId: id, conversationId: target }],
+          kind: "text",
+        }),
+      };
+    }
+    if (account.config.omemo.requireEncryption) {
+      throw new Error(`OMEMO encryption required for ${target}, but no compatible devices were available`);
+    }
+  }
   await connection.send(
     xml(
       "message",

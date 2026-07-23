@@ -1205,7 +1205,11 @@ async function encryptPayload(
 export function buildOmemoMessageStanza(
   to: string,
   encryptedElement: Element,
-  msgType: "chat" | "groupchat" = "chat"
+  msgType: "chat" | "groupchat" = "chat",
+  options: {
+    replaceId?: string;
+    ephemeral?: boolean;
+  } = {},
 ): Element {
   const messageId = `omemo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   // Parsed sidecar elements can carry their namespace in ltx's namespace
@@ -1226,8 +1230,17 @@ export function buildOmemoMessageStanza(
       namespace: encryptionNamespace,
       name: "OMEMO",
     }),
-    // Store hint for MAM
-    xml("store", { xmlns: "urn:xmpp:hints" }),
+    // XEP-0308 metadata does not contain the edited plaintext.  It must stay
+    // on the outer stanza so clients can correlate the encrypted correction
+    // before/after decrypting its payload.
+    ...(options.replaceId
+      ? [xml("replace", { xmlns: "urn:xmpp:message-correct:0", id: options.replaceId })]
+      : []),
+    // Intermediate streaming corrections should neither fill MAM nor wake
+    // every connected client. The final correction remains archived.
+    options.ephemeral
+      ? xml("no-store", { xmlns: "urn:xmpp:hints" })
+      : xml("store", { xmlns: "urn:xmpp:hints" }),
     // SCE explicitly forbids a plaintext <body/> fallback.  Keeping one on
     // an OMEMO 2 stanza causes clients to treat the message as unencrypted
     // and leaks the presence of a synthetic body to MAM/other clients.
