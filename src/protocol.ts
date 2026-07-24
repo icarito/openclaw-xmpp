@@ -109,16 +109,38 @@ export function extractReply(stanza: Element): { text: string; sender: string } 
 
 /**
  * Detect an out-of-band file (XEP-0066) or HTTP-upload (XEP-0363) URL in an
- * inbound stanza: either an <x xmlns='jabber:x:oob'><url/> child, or a
- * bare-URL body (common client behavior when sharing a file).
+ * inbound stanza: either an <x xmlns='jabber:x:oob'><url/> child, a
+ * bare-URL body (common client behavior when sharing a file), or an
+ * inline-as-text <x xmlns='jabber:x:oob'> that a client folded into the
+ * plaintext body itself.
+ *
+ * OMEMO can only encrypt the <body> text, not sibling stanza elements, so
+ * clients that attach a file under OMEMO (gtk-llm-chat, the Android app)
+ * put the literal "<url>\n<x xmlns='jabber:x:oob'>...</x>" string inside
+ * the plaintext they encrypt. After decryption that text lands in `body`
+ * with no real <x> child on the stanza, so it must be recovered by parsing
+ * the body text itself, not just by trying stanza.getChild(...).
  */
+const INLINE_OOB_URL_RE = /<x\s+xmlns=['"]jabber:x:oob['"]\s*>\s*<url>([^<]+)<\/url>\s*<\/x>/i;
+
 export function extractOobUrl(stanza: Element, body: string): string | null {
   const x = stanza.getChild("x", "jabber:x:oob");
   const url = x?.getChildText("url");
   if (url) return url;
   const trimmed = body.trim();
   if (/^https?:\/\/\S+$/.test(trimmed)) return trimmed;
+  const inlineMatch = trimmed.match(INLINE_OOB_URL_RE);
+  if (inlineMatch) return inlineMatch[1]!.trim();
   return null;
+}
+
+/**
+ * Strip a decrypted-OMEMO inline "<x xmlns='jabber:x:oob'>...</x>" fragment
+ * out of a body so the agent/user never sees raw XML text — the URL itself
+ * (already recovered by extractOobUrl) carries the same information.
+ */
+export function stripInlineOobMarkup(body: string): string {
+  return body.replace(INLINE_OOB_URL_RE, "").trim();
 }
 
 /**
