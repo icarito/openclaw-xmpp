@@ -32,6 +32,7 @@ import {
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
 import { normalizeLowercaseStringOrEmpty, normalizeOptionalString, normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { formatXmppAudioTranscript, resolveXmppPreflightAudioTranscript } from "./preflight-audio.js";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { bareJid, buildXmppAllowlistCandidates, normalizeXmppAllowEntry } from "./normalize.js";
 import { resolveXmppGroupMatch, resolveXmppGroupRequireMention } from "./policy.js";
@@ -403,19 +404,6 @@ export async function handleXmppInbound(params: {
 
   console.error();
   const fromLabel = message.isGroup ? message.target : senderDisplay;
-  // An attachment-only message has no text; give the envelope a readable stand-in
-  // so the agent sees "there is a file" rather than an empty turn. The real link
-  // travels as MediaUrl in the context below.
-  const envelopeBody = rawBody || (inboundMediaUrl ? `[attachment] ${inboundMediaUrl}` : rawBody);
-  const { storePath, body } = buildEnvelope({
-    channel: "XMPP",
-    from: fromLabel,
-    timestamp: message.timestamp,
-    body: envelopeBody,
-  });
-
-  const groupSystemPrompt = normalizeOptionalString(groupMatch.groupConfig?.systemPrompt);
-  const blockStreamingEnabled = resolveChannelStreamingBlockEnabled(account.config);
 
   // Adjunto entrante: bajarlo y entregárselo al agente como archivo LOCAL
   // (MediaPath), no como un link que tendría que ir a buscar con un exec
@@ -435,9 +423,43 @@ export async function handleXmppInbound(params: {
       ])
     : undefined;
 
+  const audioTranscript = downloaded?.path
+    ? await resolveXmppPreflightAudioTranscript({
+        mediaPath: downloaded.path,
+        mediaContentType: downloaded.contentType,
+        cfg: config as OpenClawConfig,
+        accountId: route.accountId,
+        originatingTo: message.isGroup ? `channel:${message.target}` : `xmpp:${peerId}`,
+        sessionKey: route.sessionKey,
+        log: (line) => runtime.log?.(line),
+      })
+    : undefined;
+
+  // An attachment-only message has no text; give the envelope a readable stand-in
+  // so the agent sees "there is a file" rather than an empty turn. The real link
+  // travels as MediaUrl in the context below. Un transcripto de audio resuelto
+  // se agrega al body de texto (mismo patrón que el canal Matrix), ya que
+  // finalizeInboundContext no tiene un campo separado para esto.
+  const envelopeBodyBase = rawBody || (inboundMediaUrl ? `[attachment] ${inboundMediaUrl}` : rawBody);
+  const envelopeBody = audioTranscript
+    ? [envelopeBodyBase, formatXmppAudioTranscript(audioTranscript)].filter(Boolean).join("\n")
+    : envelopeBodyBase;
+  const rawBodyWithTranscript = audioTranscript
+    ? [rawBody, formatXmppAudioTranscript(audioTranscript)].filter(Boolean).join("\n")
+    : rawBody;
+  const { storePath, body } = buildEnvelope({
+    channel: "XMPP",
+    from: fromLabel,
+    timestamp: message.timestamp,
+    body: envelopeBody,
+  });
+
+  const groupSystemPrompt = normalizeOptionalString(groupMatch.groupConfig?.systemPrompt);
+  const blockStreamingEnabled = resolveChannelStreamingBlockEnabled(account.config);
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    RawBody: rawBody,
+    RawBody: rawBodyWithTranscript,
     CommandBody: rawBody,
     ...(mediaPayload ?? {}),
     From: message.isGroup ? `channel:${message.target}` : `xmpp:${senderDisplay}`,
@@ -489,86 +511,100 @@ export async function handleXmppInbound(params: {
     cfg: config,
     account,
     target: peerId,
+    sessionKey: route.sessionKey,
     log: (line) => runtime.log?.(line),
   });
   await progress.start();
   let deliveredVisibleReply = false;
+  let turnError: unknown = null;
 
-  await core.channel.inbound.dispatchReply({
-    cfg: config as OpenClawConfig,
-    channel: CHANNEL_ID,
-    accountId: account.accountId,
-    agentId: route.agentId,
-    routeSessionKey: route.sessionKey,
-    storePath,
-    ctxPayload,
-    recordInboundSession: core.channel.session.recordInboundSession,
-    dispatchReplyWithBufferedBlockDispatcher: core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
-    delivery: {
-      deliver: async (payload) => {
-        deliveredVisibleReply = true;
-        const p = payload as OutboundReplyPayload & {
-          presentation?: unknown;
-          mediaUrl?: string | null;
-          channelData?: Record<string, unknown>;
-          text?: string | null;
-        };
-        // Finalización de preview estilo Telegram: una respuesta de texto puro
-        // convierte la burbuja de progreso en la respuesta final (una última
-        // corrección XEP-0308) en vez de llegar como mensaje aparte.
-        if (p.text && !p.presentation && !p.mediaUrl && !p.channelData) {
-          const handled = await progress.finalizeWithFinalText(p.text);
-          if (handled) {
-            statusSink?.({ lastOutboundAt: Date.now() });
-            return;
+  try {
+    await core.channel.inbound.dispatchReply({
+      cfg: config as OpenClawConfig,
+      channel: CHANNEL_ID,
+      accountId: account.accountId,
+      agentId: route.agentId,
+      routeSessionKey: route.sessionKey,
+      storePath,
+      ctxPayload,
+      recordInboundSession: core.channel.session.recordInboundSession,
+      dispatchReplyWithBufferedBlockDispatcher: core.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
+      delivery: {
+        deliver: async (payload) => {
+          deliveredVisibleReply = true;
+          const p = payload as OutboundReplyPayload & {
+            presentation?: unknown;
+            mediaUrl?: string | null;
+            channelData?: Record<string, unknown>;
+            text?: string | null;
+          };
+          // Finalización de preview estilo Telegram: una respuesta de texto puro
+          // convierte la burbuja de progreso en la respuesta final (una última
+          // corrección XEP-0308) en vez de llegar como mensaje aparte.
+          if (p.text && !p.presentation && !p.mediaUrl && !p.channelData) {
+            const handled = await progress.finalizeWithFinalText(p.text);
+            if (handled) {
+              statusSink?.({ lastOutboundAt: Date.now() });
+              return;
+            }
+          } else {
+            // Payload no finalizable (media/card): drenar la edición pendiente
+            // para que la burbuja esté al día antes de la respuesta.
+            await progress.closeWindow();
           }
-        } else {
-          // Payload no finalizable (media/card): drenar la edición pendiente
-          // para que la burbuja esté al día antes de la respuesta.
-          await progress.closeWindow();
-        }
-        await deliverXmppReply({
-          payload,
-          cfg: config,
-          target: peerId,
-          accountId: account.accountId,
-          sendReply: params.sendReply,
-          statusSink,
-        });
+          await deliverXmppReply({
+            payload,
+            cfg: config,
+            target: peerId,
+            accountId: account.accountId,
+            sendReply: params.sendReply,
+            statusSink,
+          });
+        },
+        onError: (err, info) => {
+          runtime.error?.(`xmpp ${info.kind} reply failed: ${String(err)}`);
+        },
       },
-      onError: (err, info) => {
-        runtime.error?.(`xmpp ${info.kind} reply failed: ${String(err)}`);
+      replyPipeline: {},
+      replyOptions: {
+        // XMPP is conversational: when a human talks while the agent is already
+        // working, treat the new message as steering for the active turn instead
+        // of silently stacking a follow-up behind it.
+        streamingBehavior: "steer",
+        skillFilter: groupMatch.groupConfig?.skills,
+        disableBlockStreaming:
+          typeof blockStreamingEnabled === "boolean" ? !blockStreamingEnabled : undefined,
+        ...(progress.active
+          ? {
+              suppressDefaultToolProgressMessages: progress.suppressDefaultToolProgressMessages,
+              preserveProgressCallbackStartOrder: true,
+              onPartialReply: progress.handlePartialReply,
+              onToolStart: progress.handleToolStart,
+              onItemEvent: progress.handleItemEvent,
+              onApprovalEvent: progress.handleApprovalEvent,
+              onCommandOutput: progress.handleCommandOutput,
+              onPatchSummary: progress.handlePatchSummary,
+            }
+          : {}),
+      } as XmppReplyOptions,
+      record: {
+        onRecordError: (err) => {
+          runtime.error?.(`xmpp: failed updating session meta: ${String(err)}`);
+        },
       },
-    },
-    replyPipeline: {},
-    replyOptions: {
-      // XMPP is conversational: when a human talks while the agent is already
-      // working, treat the new message as steering for the active turn instead
-      // of silently stacking a follow-up behind it.
-      streamingBehavior: "steer",
-      skillFilter: groupMatch.groupConfig?.skills,
-      disableBlockStreaming:
-        typeof blockStreamingEnabled === "boolean" ? !blockStreamingEnabled : undefined,
-      ...(progress.active
-        ? {
-            suppressDefaultToolProgressMessages: progress.suppressDefaultToolProgressMessages,
-            preserveProgressCallbackStartOrder: true,
-            onPartialReply: progress.handlePartialReply,
-            onToolStart: progress.handleToolStart,
-            onItemEvent: progress.handleItemEvent,
-            onApprovalEvent: progress.handleApprovalEvent,
-            onCommandOutput: progress.handleCommandOutput,
-            onPatchSummary: progress.handlePatchSummary,
-          }
-        : {}),
-    } as XmppReplyOptions,
-    record: {
-      onRecordError: (err) => {
-        runtime.error?.(`xmpp: failed updating session meta: ${String(err)}`);
-      },
-    },
-  });
-  if (!deliveredVisibleReply) {
+    });
+  } catch (err) {
+    turnError = err;
+    runtime.error?.(`xmpp turn failed for ${peerId}: ${String(err)}`);
+  }
+  // El cierre del turno NO puede depender de que el pipeline haya terminado
+  // bien: una excepción (exec fallido, modelo caído, red) antes se saltaba
+  // TODO esto — la burbuja de progreso quedaba viva para siempre (el cliente
+  // la muestra "trabajando" sin fin) y la presencia ocupada. Finalizar
+  // siempre, y que el fallo sea visible en vez de silencioso.
+  if (turnError && !deliveredVisibleReply) {
+    await progress.finishWithError(turnError);
+  } else if (!deliveredVisibleReply) {
     await progress.finishWithoutReply();
   }
   // A final reply may be delivered by editing the progress bubble. Unlike a
@@ -577,4 +613,7 @@ export async function handleXmppInbound(params: {
     cfg: config,
     accountId: account.accountId,
   }).catch(() => {});
+  if (turnError) {
+    throw turnError;
+  }
 }

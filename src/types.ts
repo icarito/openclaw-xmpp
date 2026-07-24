@@ -66,6 +66,20 @@ export type XmppAccountConfig = {
   capabilities?: XmppCapabilitiesConfig;
   /** Context-window size used to compute the /context percentage. */
   contextWindowTokens?: number;
+  /** OMEMO encryption configuration. */
+  omemo?: {
+    enabled?: boolean;
+    deviceLabel?: string;
+    /** Protocol namespace used for publication/envelopes (defaults to legacy). */
+    /** Use `dual` to publish the same device and bundle in both OMEMO namespaces. */
+    protocol?: "legacy" | "v2" | "dual";
+    /** Refuse plaintext when OMEMO cannot encrypt a message. */
+    requireEncryption?: boolean;
+  };
+  streamManagement?: {
+    enabled?: boolean;
+    resumptionMaxSeconds?: number;
+  };
 };
 
 type XmppConfig = XmppAccountConfig & {
@@ -96,6 +110,9 @@ export type XmppInboundMessage = {
   replyTo?: { text: string; sender: string };
   /** XEP-0363/XEP-0066 out-of-band attachment URL, if present. */
   oobUrl?: string;
+  /** True when this message arrived through XEP-0280 from another resource. */
+  isCarbonCopy?: boolean;
+  wasEncrypted?: boolean;
 };
 
 export type XmppProbe = BaseProbeResult<string> & {
