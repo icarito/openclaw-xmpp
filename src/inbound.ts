@@ -32,6 +32,7 @@ import {
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
 import { normalizeLowercaseStringOrEmpty, normalizeOptionalString, normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { formatXmppAudioTranscript, resolveXmppPreflightAudioTranscript } from "./preflight-audio.js";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { bareJid, buildXmppAllowlistCandidates, normalizeXmppAllowEntry } from "./normalize.js";
 import { resolveXmppGroupMatch, resolveXmppGroupRequireMention } from "./policy.js";
@@ -403,19 +404,6 @@ export async function handleXmppInbound(params: {
 
   console.error();
   const fromLabel = message.isGroup ? message.target : senderDisplay;
-  // An attachment-only message has no text; give the envelope a readable stand-in
-  // so the agent sees "there is a file" rather than an empty turn. The real link
-  // travels as MediaUrl in the context below.
-  const envelopeBody = rawBody || (inboundMediaUrl ? `[attachment] ${inboundMediaUrl}` : rawBody);
-  const { storePath, body } = buildEnvelope({
-    channel: "XMPP",
-    from: fromLabel,
-    timestamp: message.timestamp,
-    body: envelopeBody,
-  });
-
-  const groupSystemPrompt = normalizeOptionalString(groupMatch.groupConfig?.systemPrompt);
-  const blockStreamingEnabled = resolveChannelStreamingBlockEnabled(account.config);
 
   // Adjunto entrante: bajarlo y entregárselo al agente como archivo LOCAL
   // (MediaPath), no como un link que tendría que ir a buscar con un exec
@@ -435,9 +423,43 @@ export async function handleXmppInbound(params: {
       ])
     : undefined;
 
+  const audioTranscript = downloaded?.path
+    ? await resolveXmppPreflightAudioTranscript({
+        mediaPath: downloaded.path,
+        mediaContentType: downloaded.contentType,
+        cfg: config as OpenClawConfig,
+        accountId: route.accountId,
+        originatingTo: message.isGroup ? `channel:${message.target}` : `xmpp:${peerId}`,
+        sessionKey: route.sessionKey,
+        log: (line) => runtime.log?.(line),
+      })
+    : undefined;
+
+  // An attachment-only message has no text; give the envelope a readable stand-in
+  // so the agent sees "there is a file" rather than an empty turn. The real link
+  // travels as MediaUrl in the context below. Un transcripto de audio resuelto
+  // se agrega al body de texto (mismo patrón que el canal Matrix), ya que
+  // finalizeInboundContext no tiene un campo separado para esto.
+  const envelopeBodyBase = rawBody || (inboundMediaUrl ? `[attachment] ${inboundMediaUrl}` : rawBody);
+  const envelopeBody = audioTranscript
+    ? [envelopeBodyBase, formatXmppAudioTranscript(audioTranscript)].filter(Boolean).join("\n")
+    : envelopeBodyBase;
+  const rawBodyWithTranscript = audioTranscript
+    ? [rawBody, formatXmppAudioTranscript(audioTranscript)].filter(Boolean).join("\n")
+    : rawBody;
+  const { storePath, body } = buildEnvelope({
+    channel: "XMPP",
+    from: fromLabel,
+    timestamp: message.timestamp,
+    body: envelopeBody,
+  });
+
+  const groupSystemPrompt = normalizeOptionalString(groupMatch.groupConfig?.systemPrompt);
+  const blockStreamingEnabled = resolveChannelStreamingBlockEnabled(account.config);
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    RawBody: rawBody,
+    RawBody: rawBodyWithTranscript,
     CommandBody: rawBody,
     ...(mediaPayload ?? {}),
     From: message.isGroup ? `channel:${message.target}` : `xmpp:${senderDisplay}`,
