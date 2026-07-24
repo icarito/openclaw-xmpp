@@ -84,8 +84,14 @@ in `src/commands.ts`:
   `notifyAgent()`. Not ported — would need an OpenClaw-native skills
   registry and a way to inject a prompt into a running agent session
   out-of-band, neither of which I found a primitive for.
-- **Approval bypass** (`xmpp.ts`'s `buildApprovalBypassAction`): reads/writes
-  `modules/approvals/bypass.ts`, a NanoClaw-only module. Not ported.
+- **Approval bypass** (`xmpp.ts`'s `buildApprovalBypassAction`): originally
+  read/wrote `modules/approvals/bypass.ts`, a NanoClaw-only module. Not a
+  mechanical port, but a `approval-bypass` command now exists in this repo
+  (`src/approval-bypass.ts`, see openspec change
+  `xmpp-approval-bypass-and-fallback-cleanup`) with different mechanics:
+  session-scoped `execSecurity`/`execAsk` override via
+  `getSessionEntry`/`patchSessionEntry` (in-process plugin-sdk calls), with
+  an in-memory TTL timer for auto-reversion — no NanoClaw module, no restart.
 - **Telemetry read side** (`src/telemetry.ts`): the PEP **publish** mechanics
   (pubsub IQ building, presence caps, the "did the number move enough to
   bother publishing" thresholding) are fully ported and live. The **read**
@@ -332,9 +338,11 @@ now takes `accountId` in its constructor options (threaded from
   `buildNativeCommandActions`) is comparatively straightforward once the
   text-command-detection gap above is resolved — `native-commands.ts`'s
   pattern would extend directly.
-- **Approval bypass** (`xmpp.ts`'s `buildApprovalBypassAction`) — reads/writes
-  `modules/approvals/bypass.ts`, a NanoClaw-only module with no OpenClaw
-  equivalent found. Not ported.
+- **Approval bypass** (`xmpp.ts`'s `buildApprovalBypassAction`) — originally
+  read/wrote `modules/approvals/bypass.ts`, a NanoClaw-only module with no
+  OpenClaw equivalent found at the time. See the entry earlier in this file:
+  a `approval-bypass` command exists now with a different design (session
+  store override + in-memory TTL, not a port of the NanoClaw module).
 
 ### Nanoclaw string cleanup
 

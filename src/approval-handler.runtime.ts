@@ -31,6 +31,7 @@ import { normalizeOptionalLowercaseString, normalizeOptionalString } from "openc
 import { resolveXmppAccount } from "./accounts.js";
 import { normalizeXmppAllowEntry } from "./normalize.js";
 import { resolveInlineButtonsScope } from "./outbound-render.js";
+import { buildApprovalCardTitle, buildCompactExecApprovalText } from "./approval-text.js";
 import type { CoreConfig } from "./types.js";
 
 const log = createSubsystemLogger("xmpp/approvals");
@@ -300,9 +301,28 @@ function buildXmppPendingPayload(params: {
     expiresAtMs: request.expiresAtMs,
     nowMs: params.nowMs,
   });
+  // El texto crudo del core (payload.text) envuelve command/warningText en
+  // fences triples (formatFencedCodeBlock) que quedan vacíos cuando esos
+  // campos vienen vacíos -- ver openspec change
+  // xmpp-approval-bypass-and-fallback-cleanup. La ruta forwarder
+  // (channel.ts) ya evita esto con buildCompactExecApprovalText; se replica
+  // aquí para que ambas rutas de entrega produzcan el mismo texto.
   return {
-    text: payload.text ?? "",
-    presentation: payload.presentation as Record<string, unknown> | undefined,
+    text: buildCompactExecApprovalText({
+      command: commandText,
+      cwd: request.request.cwd ?? undefined,
+      warningText: request.request.warningText ?? undefined,
+      approvalSlug: request.id.slice(0, 8),
+      allowedDecisions,
+      expiresAtMs: request.expiresAtMs,
+      nowMs: params.nowMs,
+    }),
+    presentation: payload.presentation
+      ? {
+          ...(payload.presentation as Record<string, unknown>),
+          title: buildApprovalCardTitle(commandText),
+        }
+      : (payload.presentation as Record<string, unknown> | undefined),
     channelData: payload.channelData,
     ...(accountId ? { accountId } : {}),
   };
