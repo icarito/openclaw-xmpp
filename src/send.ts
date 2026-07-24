@@ -150,8 +150,20 @@ function inlineButtonsAllowsTarget(params: {
   }
 }
 
+/**
+ * Elimina bloques de fence triple sin contenido (o solo whitespace) entre
+ * las marcas de apertura y cierre -- p.ej. ```sh\n\n``` -- que el core
+ * produce vía formatFencedCodeBlock cuando el campo envuelto (command,
+ * warningText) llega vacío. Red de seguridad independiente de cuál ruta de
+ * entrega generó el texto (ver approval-handler.runtime.ts y channel.ts,
+ * que ya evitan este caso en el camino feliz vía buildCompactExecApprovalText).
+ */
+function stripEmptyFencedCodeBlocks(text: string): string {
+  return text.replace(/```[^\n`]*\n[ \t]*\n?```\n?/g, "\n");
+}
+
 function compactApprovalFallbackText(fallback: string): string {
-  const lines = fallback.split(/\r?\n/);
+  const lines = stripEmptyFencedCodeBlocks(fallback).split(/\r?\n/);
   const out: string[] = [];
   let skipApproveBlock = false;
   for (const rawLine of lines) {
