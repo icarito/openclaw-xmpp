@@ -83,16 +83,42 @@
       approval-bypass con diseño distinto" (session store + TTL en memoria,
       no `sessions.patch` — ver design.md D1 actualizado).
 
-## 5. Despliegue a claudio-w (fuera de este repo, coordinar aparte)
+## 5. Despliegue a claudio-w
 
-- [ ] 5.1 Actualizar el gitlink del submodule `extensions/xmpp` en
-      `claudio-w` al commit que incluye este change.
-- [ ] 5.2 Redeploy de `claudio-w-openclaw.service`.
-- [ ] 5.3 Verificación end-to-end en producción: activar bypass desde un
-      cliente real, confirmar `status` con tiempo restante, confirmar
-      auto-reversión sin restart, confirmar que una card de aprobación
-      entregada durante la ventana de bypass no aparece (o si el reviewer
-      igual la genera por algún otro motivo, investigar por separado).
+- [x] 5.1 Gitlink actualizado: `openclaw-xmpp` main (`736d5bb`) mergeado en
+      `agent/omemo-sce` (commit `7dfa29a`, pusheado), submodule
+      `extensions/xmpp` en `claudio-w` apuntando ahí, commiteado como
+      `f5b5453` (local, no pusheado a GitHub de claudio-w).
+- [x] 5.2 Redeploy ejecutado 2026-07-24 16:05 UTC: árbol de producción
+      (`/opt/claudio-w/extensions-xmpp-src/`, NO es checkout git — se
+      sincroniza copiando archivos) actualizado con
+      `OPERATIONS.md`/`PORT-NOTES.md`/`src/{approval-bypass,approval-text,
+      approval-handler.runtime,channel,commands,send}.ts`; backup previo en
+      `backups/approval-bypass-20260724160244/`. `systemctl --user restart
+      claudio-w-openclaw.service`: arranque limpio, `[gateway] ready` en
+      ~12s, 8 cuentas XMPP conectadas, sin errores, parches previos
+      re-aplicados sin cambios.
+- [x] 5.3 Verificación end-to-end con cuenta mock-approval-a vía `/oc`
+      (disco#items no respondió por bare JID sin presencia previa -- ver
+      nota abajo; textual fallback sí funcionó): `approval-bypass status`
+      inicial → "inactivo"; `on 1` → confirmación con alcance de sesión;
+      `status` a los ~21s → "activo, quedan 38s" (aritmética correcta);
+      `status` tras >70s → "inactivo" de nuevo, sin restart del gateway en
+      el medio (mismo `ActiveEnterTimestamp` antes y después). Ciclo
+      completo activación→countdown→auto-reversión confirmado en
+      producción real. No verificado en esta pasada: que una card de
+      aprobación entregada DURANTE la ventana de bypass efectivamente no
+      aparece (requeriría disparar un exec real desde una sesión de agente,
+      no solo el comando de chat) -- queda para una prueba futura con un
+      comando real.
+
+**Nota para el próximo que use `disco-test.mjs`/scripts similares**: mandar
+presencia (`<presence/>`) inmediatamente después de conectar, antes de
+enviar el primer mensaje -- sin eso el servidor no entregó el mensaje al
+bare JID de destino (sin error visible del lado cliente, simplemente no
+llegó respuesta). No se investigó la causa raíz exacta (roster/suscripción
+vs. enrutamiento de presence), solo se documenta el workaround que
+funcionó.
 
 ## 6. Cliente Android (gtk-llm-chat-android, fuera de allowedEditRoots — change/tasks propias en ese repo)
 
