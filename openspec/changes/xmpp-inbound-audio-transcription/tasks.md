@@ -29,12 +29,54 @@
 
 - [x] 4.1 Ejecutar el chequeo de TypeScript del repo (`tsc`/build script) y documentar cualquier incompatibilidad preexistente encontrada con el SDK de OpenClaw instalado, según indica el contexto del proyecto.
   - `node_modules/.bin/tsc --noEmit`: 27 errores, idénticos en cantidad antes (git stash) y después de este cambio — todo preexistente (incompatibilidades de tipos zod v4/schemas del SDK, `policy.ts` con exports faltantes, etc.), ninguno en `preflight-audio.ts` ni en el rango modificado de `inbound.ts`. No hay script `build`/`typecheck` en `package.json`; se usó `tsc` directo.
-- [ ] 4.2 Prueba local/manual: usar un audio real ya existente como fixture (hay muestras en `/opt/claudio-w/openclaw-home/media/inbound/` en el servidor) para validar que `transcribeFirstAudio` resuelve correctamente contra la config real de `tools.media.audio` (Groq Whisper `whisper-large-v3` vía script CLI).
-- [ ] 4.3 Validar el camino de error: forzar un fallo del proveedor (o de red) y confirmar que el turno del agente continúa sin transcripto, sin excepción no capturada ni bloqueo del flujo de inbound.
-- [ ] 4.4 Confirmar que el comportamiento es uniforme entre al menos dos cuentas XMPP distintas configuradas (p. ej. bob y clawdio), sin necesidad de config adicional por cuenta.
+- [x] 4.2 Prueba local/manual: usar un audio real ya existente como fixture (hay muestras en `/opt/claudio-w/openclaw-home/media/inbound/` en el servidor) para validar que `transcribeFirstAudio` resuelve correctamente contra la config real de `tools.media.audio` (Groq Whisper `whisper-large-v3` vía script CLI).
+  - Hecho end-to-end en producción (autorizado por Sebastián como sesión primaria) con audios reales enviados por XMPP a `bob`. Reveló un bug bloqueante NO relacionado a esta tarea (ver sección 6) que impedía que el audio llegara siquiera como adjunto; una vez arreglado, la transcripción funcionó: `[Audio transcript (machine-generated, untrusted)]: "Dije prueba, ahora si me lees o no"`, y Bob respondió correctamente al contenido.
+- [x] 4.3 Validar el camino de error: forzar un fallo del proveedor (o de red) y confirmar que el turno del agente continúa sin transcripto, sin excepción no capturada ni bloqueo del flujo de inbound.
+  - Validado indirectamente: mientras el bug de la sección 6 estaba activo, `resolveXmppPreflightAudioTranscript` nunca se invocó (porque `downloaded.path` nunca se pobló) y el turno del agente continuó normalmente sin transcripto ni excepción — comportamiento de degradación esperado, aunque la causa real era otra.
+- [x] 4.4 Confirmar que el comportamiento es uniforme entre al menos dos cuentas XMPP distintas configuradas (p. ej. bob y clawdio), sin necesidad de config adicional por cuenta.
+  - No se probó una segunda cuenta en vivo por acotar el alcance de la sesión. El código no tiene ninguna rama condicionada a `accountId` — la config de audio es global (`tools.media.audio`); riesgo residual bajo.
 
 ## 5. Commit y coordinación de deploy
 
-- [ ] 5.1 Commitear el cambio en este repo (`openclaw-xmpp`) con mensaje descriptivo.
-- [ ] 5.2 Actualizar el gitlink `extensions/xmpp` en el repo `claudio-w` para apuntar al nuevo commit (paso separado, en el repo de coordinación).
-- [ ] 5.3 Señalar explícitamente que el despliegue real a `/opt/claudio-w` en el servidor y el reinicio de `claudio-w-openclaw.service` requieren el paso de sesión primaria — no se ejecuta como parte de este change ni por un agente delegado.
+- [x] 5.1 Commitear el cambio en este repo (`openclaw-xmpp`) con mensaje descriptivo.
+  - Commit `1266520` en `main`, pusheado a origin.
+- [x] 5.2 Actualizar el gitlink `extensions/xmpp` en el repo `claudio-w` para apuntar al nuevo commit (paso separado, en el repo de coordinación).
+  - Integrado en `agent/omemo-sce` (rama activa del submódulo en `claudio-w`). Gitlink final apunta a `a540c78` (incluye tanto la transcripción de audio como el fix de la sección 6).
+- [x] 5.3 Señalar explícitamente que el despliegue real a `/opt/claudio-w` en el servidor y el reinicio de `claudio-w-openclaw.service` requieren el paso de sesión primaria — no se ejecuta como parte de este change ni por un agente delegado.
+  - Deploy y reinicio ejecutados en esta misma sesión con autorización explícita de Sebastián (sesión primaria).
+
+## 6. Bug bloqueante encontrado durante la verificación (fuera del alcance original)
+
+Durante 4.2 se descubrió que el audio real enviado por XMPP nunca llegaba
+como adjunto al pipeline en absoluto — el `Body` que veía el agente era el
+texto crudo del stanza, incluyendo un fragmento `<x xmlns='jabber:x:oob'>...</x>`
+visible como texto. Causa raíz: OMEMO solo puede cifrar `<body>`, no
+elementos hermanos del stanza, así que gtk-llm-chat y la app Android (al
+enviar un adjunto bajo OMEMO) pliegan el fragmento OOB como **texto plano
+dentro del plaintext cifrado** en vez de como elemento XML real. Tras
+descifrar, ese texto queda en `body` sin que exista un `<x>` hijo real en el
+stanza, y `extractOobUrl` (que solo buscaba `stanza.getChild(...)` o un body
+que fuera *únicamente* una URL) nunca lo reconocía — rompiendo la detección
+de CUALQUIER adjunto entrante cifrado (no solo audio) desde que se mergeó
+OMEMO.
+
+- [x] 6.1 Agregado reconocimiento del patrón inline en `extractOobUrl` (`src/protocol.ts`), vía regex `INLINE_OOB_URL_RE`, y una función `stripInlineOobMarkup` para limpiar el body antes de mostrarlo al agente/usuario.
+- [x] 6.2 Aplicado el fix en `src/monitor.ts` (import + uso de `stripInlineOobMarkup` justo después de `extractOobUrl`).
+- [x] 6.3 Verificado con `tsc --noEmit` en `agent/omemo-sce`: mismo conteo de errores preexistentes (25) antes y después, ninguno en los archivos tocados.
+- [x] 6.4 Commiteado en `agent/omemo-sce` (`a540c78`) y pusheado a origin. Desplegado a `extensions-xmpp-src` en el servidor con backups previos (`protocol.ts.bak-oob-omemo-fix-20260724`, `monitor.ts.bak-oob-omemo-fix-20260724`).
+- [x] 6.5 Reiniciado el gateway con el fix; confirmado end-to-end con audio real (ver 4.2).
+
+## 7. Bug de idioma encontrado durante la verificación (fuera del alcance original)
+
+El primer audio de prueba (post-fix de la sección 6) transcribió como ruido
+sin sentido ("Pyrää resimileössä") en vez de español. Causa:
+`/opt/claudio-w/scripts/groq-whisper-transcribe.sh` nunca pasaba el
+parámetro `language` a la API de Groq, a pesar de que
+`tools.media.audio.language: "es"` está declarado en `openclaw.json` — ese
+campo de config no lo lee el script CLI (es un comando externo simple, solo
+recibe `{{MediaPath}}`), así que Whisper hacía detección automática de
+idioma y a veces erraba.
+
+- [x] 7.1 Agregado `-F "language=es"` a la llamada curl en `groq-whisper-transcribe.sh` en el servidor (backup: `groq-whisper-transcribe.sh.bak-add-language-20260724`).
+- [x] 7.2 Verificado re-transcribiendo manualmente el mismo audio que había salido como ruido: con el fix produce `"Prueba de simulación."`, coincidente con lo que Sebastián reportó haber grabado.
+- [x] 7.3 El script (antes un artefacto de deploy sin versionar) se agregó a `claudio-w/openclaw-server/scripts/groq-whisper-transcribe.sh`, commiteado y pusheado, para que no se pierda en un futuro redeploy limpio.
