@@ -1,6 +1,13 @@
 // Xmpp plugin module implements send behavior.
 import { client, xml } from "@xmpp/client";
+import type { Element } from "@xmpp/xml";
 import crypto from "node:crypto";
+import {
+  encryptOmemoMessage,
+  encryptMucOmemoMessage,
+  isRoomOmemoCapable,
+  buildOmemoMessageStanza,
+} from "./omemo/index.js";
 import {
   createMessageReceiptFromOutboundResults,
   type MessageReceipt,
@@ -357,7 +364,7 @@ export async function sendMessageXmpp(
       xmpp: transient,
       isConnected: () => true,
       send: async (stanza) => { await transient.send(stanza); },
-      joinRoom: () => {},
+      joinRoom: async () => {},
       stop: async () => { await transient.stop(); },
     };
     transientCleanup = async () => { await transient.stop(); };
@@ -366,10 +373,41 @@ export async function sendMessageXmpp(
   let firstId: string | undefined;
   if (connection?.isConnected()) {
     const chunks = splitForLimit(plain, XMPP_MAX_BODY);
+    const logger = getXmppRuntime().logging.getChildLogger({
+      channel: "xmpp",
+      accountId: account.accountId,
+    });
     try {
       for (let i = 0; i < chunks.length; i++) {
         const id = nextStanzaId();
         if (i === 0) firstId = id;
+
+        if (account.config.omemo?.enabled) {
+          let encryptedElement: Element | null = null;
+          if (type === "groupchat") {
+            if (isRoomOmemoCapable(account.accountId, target)) {
+              encryptedElement = await encryptMucOmemoMessage(account.accountId, target, chunks[i]!, logger);
+            } else {
+              logger.warn(`[${account.accountId}] OMEMO MUC fallback: room ${target} is semi-anonymous/anonymous or has no occupants with OMEMO, sending plaintext`);
+            }
+          } else {
+            encryptedElement = await encryptOmemoMessage(account.accountId, target, chunks[i]!, logger);
+            if (!encryptedElement) {
+              logger.warn(`[${account.accountId}] OMEMO fallback: recipient ${target} has no OMEMO devices published, sending plaintext`);
+            }
+          }
+
+          if (encryptedElement) {
+            const stanza = buildOmemoMessageStanza(target, encryptedElement, type);
+            stanza.attrs.id = id;
+            await connection.send(stanza);
+            continue;
+          }
+          if (account.config.omemo.requireEncryption) {
+            throw new Error(`OMEMO encryption required for ${target}, but no compatible devices were available`);
+          }
+        }
+
         await connection.send(xml("message", { type, to: target, id }, xml("body", {}, chunks[i]!)));
       }
     } finally {
@@ -770,6 +808,51 @@ export async function sendEditXmpp(
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
   const id = nextStanzaId();
   const body = plain.length > XMPP_MAX_BODY ? splitForLimit(plain, XMPP_MAX_BODY)[0]! : plain;
+
+  // Keep the XEP-0308 correlation on the outer stanza while encrypting only
+  // the edited body. <replace/> exposes the stanza id being corrected, not
+  // the message text; dropping it turns every streaming update into a new
+  // bubble in Gajim, Dino and gtk-llm-chat.
+  if (account.config.omemo?.enabled) {
+    const logger = getXmppRuntime().logging.getChildLogger({
+      channel: "xmpp",
+      accountId: account.accountId,
+    });
+    let encryptedElement: Element | null = null;
+    if (type === "groupchat") {
+      if (isRoomOmemoCapable(account.accountId, target)) {
+        encryptedElement = await encryptMucOmemoMessage(account.accountId, target, body, logger);
+      } else {
+        logger.warn(`[${account.accountId}] OMEMO MUC edit fallback: room ${target} is not OMEMO-capable`);
+      }
+    } else {
+      encryptedElement = await encryptOmemoMessage(account.accountId, target, body, logger);
+      if (!encryptedElement) {
+        logger.warn(`[${account.accountId}] OMEMO edit fallback: recipient ${target} has no compatible devices`);
+      }
+    }
+
+    if (encryptedElement) {
+      const stanza = buildOmemoMessageStanza(target, encryptedElement, type, {
+        replaceId: editTargetId,
+        ephemeral: opts.ephemeral,
+      });
+      stanza.attrs.id = id;
+      await connection.send(stanza);
+      recordXmppOutboundActivity(account.accountId);
+      return {
+        messageId: id,
+        target,
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [{ channel: "xmpp", messageId: id, conversationId: target }],
+          kind: "text",
+        }),
+      };
+    }
+    if (account.config.omemo.requireEncryption) {
+      throw new Error(`OMEMO encryption required for ${target}, but no compatible devices were available`);
+    }
+  }
   await connection.send(
     xml(
       "message",
