@@ -1,10 +1,25 @@
 # XMPP gateway operations
 
-## Approval modes
+## Approval modes: one concept, four scopes
 
-The XMPP extension exposes two distinct ad-hoc command nodes. They are NOT
-aliases of each other -- they have different scope, persistence, and
-mechanics:
+There is one question -- "let this agent/session/command run without asking
+me" -- answered at four different scopes, not four competing mechanisms.
+Pick the row that matches how much you want relaxed and for how long:
+
+| Scope | Mechanism | Persistence | Restart needed? |
+|---|---|---|---|
+| This conversation, for N minutes | `approval-bypass` (below) | session store + durable record, survives a gateway restart | No |
+| This session, until changed | `elevated` (OpenClaw core native command; not yet exposed via XEP-0050 in this plugin -- planned, see `xmpp-parity-baseline` Phase 3) | `SessionEntry.elevatedLevel` | No |
+| This agent, permanently | `approval-mode` (below) | `openclaw.json` on disk | **Yes** |
+| Specific commands, permanently | `exec-approvals.json` allowlist (below) | file | Yes |
+
+Nothing here is a fallback for something broken -- each row solves a
+genuinely different situation, and none of them starts an agent turn, so
+changing approval policy can never itself trigger an approval loop.
+
+### `approval-mode` and `approval-bypass`
+
+The two ad-hoc command nodes documented in detail below:
 
 - `approval-mode`: agent-wide, persistent policy change. Edits
   `openclaw.json` on disk (`tools.exec`); requires restarting
@@ -16,13 +31,20 @@ mechanics:
   `openclaw/plugin-sdk/session-store-runtime`) -- no config file write, no
   restart. Auto-reverts after a configurable number of minutes (default 10,
   max 60) via an in-memory timer in the plugin process; can also be turned
-  off early. If the gateway restarts while a bypass is active, the timer is
-  lost and the relaxed session state persists until manually reverted (see
-  openspec change `xmpp-approval-bypass-and-fallback-cleanup` design.md for
-  the full rationale).
+  off early. The expiration and pre-bypass policy are ALSO persisted in the
+  session store (`pluginExtensions.xmpp.approvalBypass`): if the gateway
+  restarts while a bypass is active, a sweep on plugin load reverts any
+  bypass whose expiration has already passed, restoring the recorded
+  pre-bypass policy -- fail-closed, not fail-open (see openspec change
+  `xmpp-approval-unified-contract` design.md for the full rationale; this
+  replaces the earlier fail-open-on-restart behavior documented in the now
+  archived `xmpp-approval-bypass-and-fallback-cleanup`).
 
-Neither command starts an agent turn, so changing approval policy cannot
-itself create an approval loop.
+`approval-bypass status` returns both a human-readable note and a structured
+XEP-0004 `type="result"` form (`active`, `mode`, `expires-at-ms`,
+`remaining-seconds`) attached to the same XEP-0050 command result -- clients
+that want to consume the state programmatically should read the form fields,
+not parse the note text.
 
 Both are available through XEP-0050 when the client targets the gateway's
 full resource JID, and through the universal textual fallback:
