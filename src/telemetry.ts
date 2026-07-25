@@ -497,7 +497,14 @@ export function readAgentTelemetry(cfg: CoreConfig, account: ResolvedXmppAccount
   } catch {
     return inert;
   }
-  const usage = getLastAssistantUsage(entries);
+  // Cast needed: loadEntriesFromFile returns FileEntry[] (SessionHeader |
+  // SessionEntry, the on-disk shape), getLastAssistantUsage expects
+  // SessionTreeEntry[] (the in-memory tree shape, which adds LeafEntry but
+  // is otherwise the same union). A SessionHeader here is simply not
+  // type:"message" and gets skipped, same as sumUsage()'s manual filter
+  // above -- no LeafEntry can appear in a file-loaded array, so the cast is
+  // safe at the value level even though the two exported types don't align.
+  const usage = getLastAssistantUsage(entries as never);
   if (!usage) return inert;
 
   const lastMessageEntry = [...entries].reverse().find(

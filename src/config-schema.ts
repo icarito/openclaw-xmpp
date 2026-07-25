@@ -93,6 +93,12 @@ const XmppConfigSchema = XmppAccountSchemaBase.extend({
   });
 });
 
-export const XmppChannelConfigSchema = buildChannelConfigSchema(XmppConfigSchema, {
+// Cast needed: buildChannelConfigSchema's declared param type comes from
+// openclaw's internally vendored zod build (config-schema-*.d.ts imports
+// ZodType from its own bundled schemas-*.js), a structurally distinct
+// nominal type from the "zod" package this plugin depends on directly, even
+// though both are zod 4 at runtime. Values are compatible; only TS's
+// nominal typing of the two vendored copies is not.
+export const XmppChannelConfigSchema = buildChannelConfigSchema(XmppConfigSchema as never, {
   uiHints: xmppChannelConfigUiHints,
 });
