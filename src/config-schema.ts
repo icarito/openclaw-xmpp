@@ -50,6 +50,13 @@ const XmppAccountSchemaBase = z
     capabilities: XmppCapabilitiesSchema.optional(),
     markdown: MarkdownConfigSchema,
     contextWindowTokens: z.number().int().positive().optional(),
+    streamManagement: z
+      .object({
+        enabled: z.boolean().optional(),
+        resumptionMaxSeconds: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
     ...ReplyRuntimeConfigSchemaShape,
   })
   .strict();

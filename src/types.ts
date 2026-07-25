@@ -66,6 +66,11 @@ export type XmppAccountConfig = {
   capabilities?: XmppCapabilitiesConfig;
   /** Context-window size used to compute the /context percentage. */
   contextWindowTokens?: number;
+  /** XEP-0198 stream resumption configuration. */
+  streamManagement?: {
+    enabled?: boolean;
+    resumptionMaxSeconds?: number;
+  };
 };
 
 type XmppConfig = XmppAccountConfig & {
@@ -96,6 +101,8 @@ export type XmppInboundMessage = {
   replyTo?: { text: string; sender: string };
   /** XEP-0363/XEP-0066 out-of-band attachment URL, if present. */
   oobUrl?: string;
+  /** True when this message arrived through XEP-0280 from another resource. */
+  isCarbonCopy?: boolean;
 };
 
 export type XmppProbe = BaseProbeResult<string> & {

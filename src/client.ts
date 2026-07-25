@@ -18,6 +18,11 @@ import type { Element } from "@xmpp/xml";
 
 import type { ResolvedXmppAccount } from "./accounts.js";
 
+// @xmpp/stream-management clears its resumable id on offline. Keep the last
+// id outside the client instance so a supervised reconnect can resume it.
+const lastStreamIds = new Map<string, string>();
+const lastInboundCounts = new Map<string, number>();
+
 export type XmppInboundStanzaEvent = {
   stanza: Element;
 };
@@ -153,6 +158,24 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     }
   };
 
+  const sm = (xmpp as any).streamManagement as {
+    allowResume?: boolean;
+    preferredMaximum?: number | null;
+    enabled?: boolean;
+    id?: string;
+    inbound?: number;
+  } | undefined;
+  const previousStreamId = lastStreamIds.get(account.accountId);
+  const streamManagementConfig = account.config.streamManagement;
+  const smEnabled = streamManagementConfig?.enabled !== false;
+
+  if (sm) {
+    sm.allowResume = smEnabled;
+    if (streamManagementConfig?.resumptionMaxSeconds) {
+      sm.preferredMaximum = streamManagementConfig.resumptionMaxSeconds;
+    }
+  }
+
   xmpp.on("online", async () => {
     connected = true;
     backoffMs = BACKOFF_BASE_MS;
@@ -160,6 +183,17 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     stopPing();
     pingTimer = setInterval(() => void sendPing(), PING_INTERVAL_MS);
     log.info?.(`XMPP channel connected as ${connectionLabel}`);
+    try {
+      await xmpp.send(xml(
+        "iq",
+        { type: "set", id: `carbons-${Date.now()}` },
+        xml("enable", { xmlns: "urn:xmpp:carbons:2" }),
+      ));
+      log.info?.(`[${account.accountId}] XEP-0280 message carbons enabled`);
+    } catch (err) {
+      log.warn?.(`[${account.accountId}] XEP-0280 unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (sm?.enabled && sm.id) lastStreamIds.set(account.accountId, sm.id);
     // NOTE(xmpp-migration): pass `connection` (constructed below, before
     // `xmpp.start()`) rather than relying on the caller's own
     // `await connectXmppClient(...)` return value — @xmpp/client can emit
@@ -179,6 +213,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
 
   if (options.onStanza) {
     xmpp.on("stanza", (stanza: Element) => {
+      if (sm?.inbound !== undefined) lastInboundCounts.set(account.accountId, sm.inbound);
       options.onStanza?.(stanza);
     });
   }
@@ -235,6 +270,10 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     },
   };
 
+  if (smEnabled && previousStreamId && sm) {
+    sm.id = previousStreamId;
+    sm.inbound = lastInboundCounts.get(account.accountId) ?? 0;
+  }
   await xmpp.start();
 
   return connection;
