@@ -165,11 +165,15 @@ function inlineButtonsAllowsTarget(params: {
  * entrega generó el texto (ver approval-handler.runtime.ts y channel.ts,
  * que ya evitan este caso en el camino feliz vía buildCompactExecApprovalText).
  */
-function stripEmptyFencedCodeBlocks(text: string): string {
+// Exportada para test unitario directo (src/tests/send.test.ts); sin uso
+// fuera de este módulo en runtime.
+export function stripEmptyFencedCodeBlocks(text: string): string {
   return text.replace(/```[^\n`]*\n[ \t]*\n?```\n?/g, "\n");
 }
 
-function compactApprovalFallbackText(fallback: string): string {
+// Exportada para test unitario directo (src/tests/send.test.ts); sin uso
+// fuera de este módulo en runtime.
+export function compactApprovalFallbackText(fallback: string): string {
   const lines = stripEmptyFencedCodeBlocks(fallback).split(/\r?\n/);
   const out: string[] = [];
   let skipApproveBlock = false;
