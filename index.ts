@@ -54,6 +54,19 @@ export default defineBundledChannelEntry({
     api.on("session_end", async (event) => {
       await cancelForSession(event.sessionKey, `session_end:${event.reason ?? "unknown"}`);
     });
+
+    // Barrido de bypasses de aprobación expirados (xmpp-approval-unified-
+    // contract): si el gateway reinició con un bypass activo, el timer en
+    // memoria de approval-bypass.ts se pierde, pero el registro persistido en
+    // pluginExtensions sobrevive. Sin este barrido, la sesión queda relajada
+    // (execSecurity:"full") indefinidamente -- fail-open. Corre una sola vez
+    // al cargar el plugin, no en un intervalo; fire-and-forget para no
+    // bloquear el resto del registro de hooks si algo falla.
+    void import("./src/approval-bypass.js")
+      .then(({ sweepExpiredApprovalBypasses }) => sweepExpiredApprovalBypasses())
+      .catch((err) => {
+        api.logger?.warn?.(`xmpp: fallo barriendo bypasses expirados: ${String(err)}`);
+      });
   },
   plugin: {
     specifier: "./channel-plugin-api.js",

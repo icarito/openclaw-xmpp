@@ -15,6 +15,9 @@ vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
     sessionStore.set(sessionKey, next);
     return next;
   }),
+  // Importado por approval-bypass.ts (para el barrido al arranque) pero no
+  // ejercitado por estos tests -- ver src/tests/approval-bypass-sweep.test.ts.
+  listSessionEntries: vi.fn(() => []),
 }));
 
 let currentSessionKey = "agent:test-agent:xmpp:default:direct:user@example.org";
@@ -39,6 +42,22 @@ const AUTHORIZED_JID = "user@example.org";
 
 function makeAccount(allowFrom: string[]): ResolvedXmppAccount {
   return { config: { allowFrom } } as unknown as ResolvedXmppAccount;
+}
+
+// mode=status devuelve {text, fields} desde la Fase 2 (xmpp-approval-unified-
+// contract); mode=on/off siguen devolviendo string plano. Este helper lee el
+// texto legible sin importar cuál shape haya devuelto el handler --
+// equivalente al normalizeActionResult() que usa xep-0050.ts en producción.
+function resultText(result: Awaited<ReturnType<ReturnType<typeof buildApprovalBypassAction>["handler"]>>): string {
+  return typeof result === "string" ? result : result.text;
+}
+
+function resultField(
+  result: Awaited<ReturnType<ReturnType<typeof buildApprovalBypassAction>["handler"]>>,
+  name: string,
+): string | undefined {
+  if (typeof result === "string") return undefined;
+  return result.fields?.find((f) => f.var === name)?.value;
 }
 
 // approval-bypass.ts mantiene su Map `activeBypasses` a nivel de módulo, por
@@ -80,8 +99,10 @@ describe("approval-bypass", () => {
     vi.advanceTimersByTime(60_000);
     const status = await action.handler({ mode: "status" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
 
-    expect(String(status)).toContain("activo");
-    expect(String(status)).toMatch(/quedan/);
+    expect(resultText(status)).toContain("activo");
+    expect(resultText(status)).toMatch(/quedan/);
+    expect(resultField(status, "active")).toBe("true");
+    expect(Number(resultField(status, "remaining-seconds"))).toBeGreaterThan(0);
   });
 
   it("auto-revierte al vencer la duración, sin necesitar otro comando", async () => {
@@ -94,7 +115,8 @@ describe("approval-bypass", () => {
 
     expect(sessionStore.get(SESSION_KEY)?.execSecurity).not.toBe("full");
     const status = await action.handler({ mode: "status" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
-    expect(String(status)).toContain("inactivo");
+    expect(resultText(status)).toContain("inactivo");
+    expect(resultField(status, "active")).toBe("false");
   });
 
   it("mode=off revierte de inmediato y cancela el timer de auto-reversión", async () => {
@@ -110,7 +132,7 @@ describe("approval-bypass", () => {
     // segunda reversión sobre un entry ya borrado -- no debe pasar nada.
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     const status = await action.handler({ mode: "status" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
-    expect(String(status)).toContain("inactivo");
+    expect(resultText(status)).toContain("inactivo");
   });
 
   it("clampea minutes por encima del máximo configurado y lo informa", async () => {
@@ -137,6 +159,6 @@ describe("approval-bypass", () => {
     const action = buildApprovalBypassAction({ account: makeAccount(["otro@example.org"]), cfg: {} as CoreConfig });
     const status = await action.handler({ mode: "status" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
 
-    expect(String(status)).toContain("inactivo");
+    expect(resultText(status)).toContain("inactivo");
   });
 });
