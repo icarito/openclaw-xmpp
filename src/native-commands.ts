@@ -110,7 +110,9 @@ export async function tryResolveXmppApprovalCommand(params: {
  * Telegram, and they all degrade fine to "one XEP-0004 text-single
  * field, or zero fields for a no-arg invocation".
  */
-const EXPOSED_NATIVE_COMMAND_KEYS = ["context", "compact", "reset", "new", "model"];
+// Exportada para que el chequeo de paridad (src/parity/) lea la fuente de
+// verdad real en vez de duplicar la lista y desincronizarse de ella.
+export const EXPOSED_NATIVE_COMMAND_KEYS = ["context", "compact", "reset", "new", "model"];
 
 export function buildAbortAction(params: {
   account: ResolvedXmppAccount;

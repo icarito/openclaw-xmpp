@@ -25,6 +25,22 @@ export interface ActionContext {
   accountId: string;
 }
 
+/** One field of a XEP-0050/XEP-0004 `type="result"` form (a report, not a
+ *  form to fill in -- var/value pairs, no options/choices). */
+export interface ResultField {
+  var: string;
+  value: string;
+}
+
+/**
+ * What an action handler can return. Plain `string` keeps every existing
+ * handler valid unchanged; `{text, fields}` lets a handler additionally
+ * attach a structured result form (XEP-0050 §3.4) alongside the
+ * human-readable `<note>`, for clients that want to consume state without
+ * parsing prose (see xmpp-approval-unified-contract).
+ */
+export type ActionResult = string | { text: string; fields?: ResultField[] };
+
 export interface XmppAction {
   /** Unique command node for XEP-0050 (e.g. "context", "model"). */
   node: string;
@@ -40,13 +56,13 @@ export interface XmppAction {
    * Handler: receives resolved params {key: value} and an execution context.
    * Static handlers may ignore ctx (kept optional for backward-compat).
    */
-  handler: (params: Record<string, string>, ctx?: ActionContext) => Promise<string> | string;
+  handler: (params: Record<string, string>, ctx?: ActionContext) => Promise<ActionResult> | ActionResult;
 }
 
 export interface ActionDispatcher {
   listActions(): XmppAction[];
   getAction(node: string): XmppAction | undefined;
-  execute(node: string, params: Record<string, string>, ctx?: ActionContext): Promise<string>;
+  execute(node: string, params: Record<string, string>, ctx?: ActionContext): Promise<ActionResult>;
   registerAction(action: XmppAction): void;
   unregisterAction(node: string): void;
 }

@@ -7,15 +7,23 @@
 // turn via resolveExecDefaults -- no restart, no config file write, and
 // scoped to one session rather than the whole agent.
 //
-// The auto-reversion timer lives in this module's in-memory state (a Map),
-// not in the session store itself: if the gateway restarts while a bypass
-// is active, the timer is lost but the relaxed execSecurity/execAsk value
-// already persisted in the session store survives (documented risk, see
-// openspec change xmpp-approval-bypass-and-fallback-cleanup design.md D3).
-import { getSessionEntry, patchSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
+// The in-memory timer (`activeBypasses`) is the fast path when the gateway
+// process does not restart. The bypass's expiration and pre-bypass policy
+// are ALSO persisted in the session store under
+// pluginExtensions.xmpp.approvalBypass -- see xmpp-approval-unified-contract
+// design.md D3. This is what turns a restart during an active bypass into
+// fail-closed instead of fail-open (the previous, accepted behavior): the
+// timer is lost on restart, but sweepExpiredApprovalBypasses() reads the
+// persisted record on plugin load and reverts anything already expired.
+import {
+  getSessionEntry,
+  listSessionEntries,
+  patchSessionEntry,
+  type SessionEntry,
+} from "openclaw/plugin-sdk/session-store-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { ResolvedXmppAccount } from "./accounts.js";
-import type { ActionContext, XmppAction } from "./actions.js";
+import type { ActionContext, ActionResult, XmppAction } from "./actions.js";
 import { normalizeXmppAllowEntry } from "./normalize.js";
 import type { CoreConfig } from "./types.js";
 
@@ -25,12 +33,25 @@ const MAX_BYPASS_MINUTES = 60;
 const BYPASS_EXEC_SECURITY = "full";
 const BYPASS_EXEC_ASK = "off";
 
+const PLUGIN_NAMESPACE = "xmpp";
+const BYPASS_EXTENSION_KEY = "approvalBypass";
+
 type BypassEntry = {
   sessionKey: string;
   previousExecSecurity: string | undefined;
   previousExecAsk: string | undefined;
   expiresAtMs: number;
   timer: ReturnType<typeof setTimeout>;
+};
+
+/** Shape persisted under `SessionEntry.pluginExtensions.xmpp.approvalBypass`.
+ *  Plain JSON (string | number | null, no undefined) -- SessionPluginJsonValue
+ *  doesn't accept undefined, so the previous-policy fields use null when
+ *  there was no prior value to restore. */
+type PersistedBypass = {
+  expiresAtMs: number;
+  previousExecSecurity: string | null;
+  previousExecAsk: string | null;
 };
 
 // In-memory only, by design -- see module header. Keyed by sessionKey, not
@@ -63,21 +84,83 @@ function resolveRoute(params: { account: ResolvedXmppAccount; cfg: CoreConfig; f
   });
 }
 
-/** Reverts one session's exec policy to its pre-bypass value and clears the
- *  tracked entry. Shared by mode=off, the expiry timer, and (implicitly) a
- *  fresh mode=on that replaces an existing entry -- so there is exactly one
- *  code path that performs a reversion. */
-async function revertBypass(params: { agentId: string; entry: BypassEntry }): Promise<void> {
-  clearTimeout(params.entry.timer);
-  activeBypasses.delete(params.entry.sessionKey);
+/** Removes the persisted bypass record from a session entry's
+ *  pluginExtensions, preserving every other namespace/key untouched. */
+function clearPersistedBypass(entry: Pick<SessionEntry, "pluginExtensions"> | undefined): SessionEntry["pluginExtensions"] {
+  const xmppExt = { ...(entry?.pluginExtensions?.[PLUGIN_NAMESPACE] ?? {}) };
+  delete xmppExt[BYPASS_EXTENSION_KEY];
+  return {
+    ...entry?.pluginExtensions,
+    [PLUGIN_NAMESPACE]: xmppExt,
+  };
+}
+
+/** Reverts one session's exec policy to its pre-bypass value, clears the
+ *  tracked in-memory entry (if any) and the persisted record. Shared by
+ *  mode=off, the expiry timer, and the startup sweep -- so there is exactly
+ *  one code path that performs a reversion, regardless of which of the
+ *  three triggered it. */
+async function revertBypass(params: {
+  agentId: string;
+  sessionKey: string;
+  previousExecSecurity: string | undefined;
+  previousExecAsk: string | undefined;
+  timer?: ReturnType<typeof setTimeout>;
+}): Promise<void> {
+  if (params.timer) clearTimeout(params.timer);
+  activeBypasses.delete(params.sessionKey);
   await patchSessionEntry({
     agentId: params.agentId,
-    sessionKey: params.entry.sessionKey,
-    update: () => ({
-      execSecurity: params.entry.previousExecSecurity,
-      execAsk: params.entry.previousExecAsk,
+    sessionKey: params.sessionKey,
+    update: (entry) => ({
+      execSecurity: params.previousExecSecurity,
+      execAsk: params.previousExecAsk,
+      pluginExtensions: clearPersistedBypass(entry),
     }),
   });
+}
+
+/**
+ * Sweeps every session for a persisted bypass whose expiration has already
+ * passed, and reverts it. Meant to run once at plugin load
+ * (`index.ts`'s `registerFull`), fire-and-forget.
+ *
+ * Unlike reconciling orphaned core approvals (blocked: plugin-sdk exposes no
+ * endpoint to enumerate those), this IS implementable: the plugin owns this
+ * record end to end, so there is no core state to reconcile against -- only
+ * the plugin's own persisted state to read and act on locally.
+ */
+export async function sweepExpiredApprovalBypasses(): Promise<{ reverted: number }> {
+  const nowMs = Date.now();
+  const entries = listSessionEntries({});
+  let reverted = 0;
+
+  for (const { sessionKey, entry } of entries) {
+    const persisted = entry.pluginExtensions?.[PLUGIN_NAMESPACE]?.[BYPASS_EXTENSION_KEY] as
+      | PersistedBypass
+      | undefined;
+    if (!persisted || persisted.expiresAtMs >= nowMs) continue;
+
+    const agentId = deriveAgentIdFromSessionKey(sessionKey);
+    if (!agentId) continue;
+
+    await revertBypass({
+      agentId,
+      sessionKey,
+      previousExecSecurity: persisted.previousExecSecurity ?? undefined,
+      previousExecAsk: persisted.previousExecAsk ?? undefined,
+    });
+    reverted += 1;
+  }
+
+  return { reverted };
+}
+
+/** `sessionKey` is shaped `agent:<agentId>:...` (buildAgentSessionKey);
+ *  agentId is the first colon-delimited segment after the literal "agent". */
+function deriveAgentIdFromSessionKey(sessionKey: string): string | undefined {
+  const match = /^agent:([^:]+):/.exec(sessionKey);
+  return match?.[1];
 }
 
 export function buildApprovalBypassAction(params: {
@@ -118,7 +201,7 @@ export function buildApprovalBypassAction(params: {
       },
     ],
     mutating: true,
-    handler: async (formParams, ctx) => {
+    handler: async (formParams, ctx): Promise<ActionResult> => {
       const mode = (formParams.mode || "status").trim().toLowerCase();
       if (mode !== "on" && mode !== "off" && mode !== "status") {
         throw new Error(`Modo invalido: ${formParams.mode}. Usa on, off o status.`);
@@ -133,8 +216,22 @@ export function buildApprovalBypassAction(params: {
       const nowMs = Date.now();
 
       if (mode === "status") {
-        if (!existing) return "Bypass: inactivo para esta conversacion.";
-        return `Bypass: activo, quedan ${formatRemaining(existing.expiresAtMs, nowMs)}.`;
+        if (!existing) {
+          return { text: "Bypass: inactivo para esta conversacion.", fields: [{ var: "active", value: "false" }] };
+        }
+        return {
+          text: `Bypass: activo, quedan ${formatRemaining(existing.expiresAtMs, nowMs)}.`,
+          fields: [
+            { var: "active", value: "true" },
+            { var: "scope", value: "session" },
+            { var: "mode", value: "on" },
+            { var: "expires-at-ms", value: String(existing.expiresAtMs) },
+            {
+              var: "remaining-seconds",
+              value: String(Math.max(0, Math.round((existing.expiresAtMs - nowMs) / 1000))),
+            },
+          ],
+        };
       }
 
       if (!isAuthorized(account, ctx)) {
@@ -143,7 +240,13 @@ export function buildApprovalBypassAction(params: {
 
       if (mode === "off") {
         if (!existing) return "Bypass: ya estaba inactivo para esta conversacion.";
-        await revertBypass({ agentId: route.agentId, entry: existing });
+        await revertBypass({
+          agentId: route.agentId,
+          sessionKey: existing.sessionKey,
+          previousExecSecurity: existing.previousExecSecurity,
+          previousExecAsk: existing.previousExecAsk,
+          timer: existing.timer,
+        });
         return "Bypass: desactivado. Policy de exec restaurada.";
       }
 
@@ -174,11 +277,16 @@ export function buildApprovalBypassAction(params: {
       const timer = setTimeout(() => {
         const entry = activeBypasses.get(route.sessionKey);
         if (!entry) return; // already reverted manually
-        void revertBypass({ agentId: route.agentId, entry }).catch(() => {
+        void revertBypass({
+          agentId: route.agentId,
+          sessionKey: entry.sessionKey,
+          previousExecSecurity: entry.previousExecSecurity,
+          previousExecAsk: entry.previousExecAsk,
+        }).catch(() => {
           // Best-effort: if this fails, the session stays relaxed until a
-          // manual "off" or a future bypass replaces it. No retry loop --
-          // see design.md risk on gateway restarts for the same accepted
-          // failure mode.
+          // manual "off", a future bypass replacing it, or the startup
+          // sweep on the next process start (the persisted record survives
+          // even if this in-memory revert failed).
         });
       }, minutes * 60_000);
 
@@ -193,9 +301,20 @@ export function buildApprovalBypassAction(params: {
       await patchSessionEntry({
         agentId: route.agentId,
         sessionKey: route.sessionKey,
-        update: () => ({
+        update: (entry) => ({
           execSecurity: BYPASS_EXEC_SECURITY,
           execAsk: BYPASS_EXEC_ASK,
+          pluginExtensions: {
+            ...entry.pluginExtensions,
+            [PLUGIN_NAMESPACE]: {
+              ...entry.pluginExtensions?.[PLUGIN_NAMESPACE],
+              [BYPASS_EXTENSION_KEY]: {
+                expiresAtMs,
+                previousExecSecurity: previousExecSecurity ?? null,
+                previousExecAsk: previousExecAsk ?? null,
+              } satisfies PersistedBypass,
+            },
+          },
         }),
       });
 

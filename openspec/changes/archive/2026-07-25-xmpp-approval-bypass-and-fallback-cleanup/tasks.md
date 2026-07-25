@@ -4,11 +4,13 @@
       `sessions.patch` (RPC externo) a `patchSessionEntry` (llamada
       in-process del plugin-sdk), que no pasa por chequeo de scope. Ver
       design.md D1 actualizado.
-- [ ] 1.2 Confirmar en el bundle real desplegado (no solo en la copia de
-      desarrollo `extensions/xmpp/node_modules/openclaw/dist`) que
-      `resolveExecDefaults` efectivamente relee el estado de sesión en cada
-      turno, y que `getSessionEntry`/`patchSessionEntry` están expuestos con
-      esos campos en la versión de OpenClaw corriendo en producción.
+- [x] 1.2 Confirmado indirectamente por 5.3: el ciclo completo
+      activación→countdown(~21s)→auto-reversión(~70s) se verificó en
+      producción real con el mismo `ActiveEnterTimestamp` antes y después
+      (sin restart de por medio), lo que exige que `getSessionEntry`/
+      `patchSessionEntry` estén expuestos y que `resolveExecDefaults` relea
+      el estado en cada turno -- si no, el bypass no habría tenido efecto
+      observable.
 
 ## 2. Bypass temporal — servidor (openclaw-xmpp)
 
@@ -36,10 +38,13 @@
       / `MAX_BYPASS_MINUTES` en `approval-bypass.ts`) — valores del design.md
       tal cual, no se validó explícitamente con el usuario; ajustar si pide
       otros.
-- [ ] 2.9 Escribir/actualizar tests del plugin cubriendo los escenarios de
-      `specs/xmpp-approval-bypass/spec.md` (activación, auto-reversión —
-      con timers falseados/mockeados, desactivación manual, status, clamp de
-      máximo, sender no autorizado).
+- [x] 2.9 `src/tests/approval-bypass.test.ts`, 7 tests, todos los escenarios
+      del spec cubiertos con timers falseados (`vi.useFakeTimers`) y mocks de
+      `session-store-runtime`/`routing`. Nota de diseño de test: el `Map`
+      `activeBypasses` es estado de módulo sin exportar (por diseño, ver
+      header del propio módulo), así que cada test usa una `sessionKey`
+      única en vez de resetear el módulo entre tests — mismo aislamiento que
+      tendría producción entre dos sesiones reales.
 
 ## 3. Fix del fallback de texto — servidor (openclaw-xmpp)
 
@@ -51,10 +56,13 @@
 - [x] 3.2 Reforzar `compactApprovalFallbackText` en `send.ts` para eliminar
       bloques de fence triple vacíos (o solo whitespace) como red de
       seguridad independiente de la ruta de origen.
-- [ ] 3.3 Escribir/actualizar tests cubriendo los escenarios de
-      `specs/xmpp-approval-fallback-text/spec.md` (ambas rutas producen el
-      mismo texto compacto; fences vacíos se eliminan; fences con contenido
-      real se preservan).
+- [x] 3.3 `src/tests/send.test.ts`, 7 tests. Cubre `stripEmptyFencedCodeBlocks`
+      y `compactApprovalFallbackText` directamente (ambas exportadas para
+      este fin). El escenario "misma ruta nativa vs. forwarder" no se
+      re-testea por unidad: ambas rutas ya comparten la misma implementación
+      en `approval-text.ts` desde 3.1, así que sería un test de que dos
+      llamados al mismo import dan el mismo resultado — no aporta sobre
+      testear la función una vez.
 - [x] 3.4 Verificación manual (parcial, sin cliente XMPP real disponible
       desde este entorno): confirmado contra `formatFencedCodeBlock` real del
       core vendorizado (`node_modules/openclaw/dist/markdown-code-*.js`,
@@ -122,29 +130,37 @@ funcionó.
 
 ## 6. Cliente Android (gtk-llm-chat-android, fuera de allowedEditRoots — change/tasks propias en ese repo)
 
-- [ ] 6.1 Cambiar `XmppService.setApprovalBypass` para ejecutar el comando
-      ad-hoc `approval-bypass` descubierto vía disco#items (mismo camino de
-      ejecución que el resto de comandos nativos), no un mensaje de texto
-      `/oc approval-bypass on|off`.
-- [ ] 6.2 Usar el parámetro `_minutes` (hoy descartado en
-      `XmppService.ts:2753`) como valor real enviado al comando.
-- [ ] 6.3 Reflejar en la UI el `status`/tiempo restante devuelto por el
-      servidor, con consulta periódica mientras el switch está activo, para
-      que el switch no quede "prendido" tras expirar solo del lado servidor.
-- [ ] 6.4 Probar en un dispositivo/emulador real contra el gateway de
-      desarrollo antes de considerar el fix cerrado.
+- [x] 6.1 Hecho en `gtk-llm-chat-android` commit `3c116ea`
+      (`fix(xmpp): invoke approval-bypass as real ad-hoc command, add popover
+      switch`): `setApprovalBypass` usa `executeCommand` con `DataForm`, no
+      texto plano. El primer intento (`bc41309`) sí usaba `/oc` como mensaje
+      de texto y fue lo que motivó el fix real.
+- [x] 6.2 Confirmado en el código actual: `setApprovalBypass(targetJid,
+      enabled, minutes = 10)` usa `minutes` en el form (`XmppService.ts`),
+      ya no lo descarta.
+- [x] 6.3 `getApprovalBypassStatus` agregado en el mismo commit, con poll
+      cada 15s mientras el popover está abierto.
+- [ ] 6.4 Sin verificar en dispositivo/emulador real desde este entorno de
+      agente — declarado explícitamente pendiente en el propio changelog de
+      `3c116ea`. **Nota (Fase 2, `xmpp-approval-unified-contract`):**
+      `getApprovalBypassStatus` hoy parsea la prosa de respuesta por regex
+      (`/activo/i`, `/quedan\s+(\d+)([ms])/i`) — ese parseo se retira en la
+      Fase 2 a favor de un campo estructurado XEP-0004. Este `.4` queda
+      absorbido ahí, no cerrado acá.
 
 ## 7. Cliente GTK (gtk-llm-chat, fuera de allowedEditRoots — change/tasks propias en ese repo)
 
-- [ ] 7.1 Agregar el switch de bypass en el panel expandido de la sticky
-      card (equivalente al que ya existe en Android), invocando el comando
-      `approval-bypass` descubierto dinámicamente.
-- [ ] 7.2 Reflejar `status`/tiempo restante igual que en Android (punto
-      6.3), para consistencia entre clientes.
-- [ ] 7.3 Verificar que el dead code de categorización de menú en
-      `agent_commands_sidebar.py:34` (prefijo `approval-bypass`) ahora sí
-      matchea el nodo real anunciado por el servidor, y se comporta bien en
-      el menú de comandos existente.
+- [x] 7.1 Hecho en `gtk-llm-chat` commit `c850cc0`
+      (`feat(xmpp): add approval bypass switch to sticky card popover`):
+      `_set_approval_bypass` descubre el nodo vía disco#items y completa el
+      form directo con los valores del switch.
+- [x] 7.2 `_query_approval_bypass_status` en el mismo commit, mismo criterio
+      que Android (refresca al abrir el popover).
+- [ ] 7.3 Sin verificar contra un servidor real desde este entorno de
+      agente. Mismo aviso que 6.4: el parseo por regex en
+      `_query_approval_bypass_status` (idéntico patrón que Android, en
+      Python) se retira en la Fase 2 del programa de paridad
+      (`xmpp-approval-unified-contract`), no acá.
 
 ## 8. Documentación operativa — allowlist de lectura (no requiere código)
 

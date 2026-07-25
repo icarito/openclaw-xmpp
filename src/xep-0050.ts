@@ -15,7 +15,7 @@
 // command/dispatch APIs altogether.
 import { xml } from "@xmpp/client";
 import type { Element } from "@xmpp/xml";
-import type { ActionDispatcher, XmppAction } from "./actions.js";
+import type { ActionDispatcher, ActionResult, ResultField, XmppAction } from "./actions.js";
 import {
   buildRequestForm,
   parseSubmitForm,
@@ -282,8 +282,9 @@ export class Xep0050Handler {
   ): Promise<Element> {
     try {
       const result = await action.handler({}, { fromJid: from, accountId: this.accountId });
-      this.onActionComplete?.(node, result, from);
-      return this.commandCompleted(from, id, node, sessionid, result);
+      const { text, fields } = normalizeActionResult(result);
+      this.onActionComplete?.(node, text, from);
+      return this.commandCompleted(from, id, node, sessionid, text, fields);
     } catch (err) {
       if (String((err as Error)?.message) === "not-authorized") {
         return this.commandError(from, id, node, "forbidden", "Not authorized to run this command.");
@@ -314,8 +315,9 @@ export class Xep0050Handler {
       }
 
       const result = await action.handler(params, { fromJid: from, accountId: this.accountId });
-      this.onActionComplete?.(node, result, from);
-      return this.commandCompleted(from, id, node, sessionid, typeof result === "string" ? result : "");
+      const { text, fields } = normalizeActionResult(result);
+      this.onActionComplete?.(node, text, from);
+      return this.commandCompleted(from, id, node, sessionid, text, fields);
     } catch (err) {
       if (String((err as Error)?.message) === "not-authorized") {
         return this.commandError(from, id, node, "forbidden", "Not authorized to run this command.");
@@ -326,11 +328,34 @@ export class Xep0050Handler {
     }
   }
 
-  private commandCompleted(from: string, id: string, node: string, sessionid: string, text: string): Element {
+  // El <x type="result"> es hijo ADICIONAL de <command>, junto al <note>
+  // existente -- XEP-0050 §3.4 lo permite explícitamente. Clientes que no
+  // buscan ese <x> (Gajim, Cheogram vía "Execute Command" genérico) siguen
+  // viendo únicamente el <note>, sin cambio de comportamiento.
+  private commandCompleted(
+    from: string,
+    id: string,
+    node: string,
+    sessionid: string,
+    text: string,
+    fields?: ResultField[],
+  ): Element {
+    const resultForm = fields?.length
+      ? xml(
+          "x",
+          { xmlns: "jabber:x:data", type: "result" },
+          ...fields.map((f) => xml("field", { var: f.var }, xml("value", {}, f.value))),
+        )
+      : null;
     return xml(
       "iq",
       { type: "result", id, to: from },
-      xml("command", { xmlns: COMMAND_NS, node, sessionid, status: "completed" }, xml("note", { type: "info" }, text)),
+      xml(
+        "command",
+        { xmlns: COMMAND_NS, node, sessionid, status: "completed" },
+        xml("note", { type: "info" }, text),
+        ...(resultForm ? [resultForm] : []),
+      ),
     );
   }
 
@@ -372,6 +397,10 @@ export class Xep0050Handler {
       }
     }
   }
+}
+
+function normalizeActionResult(result: ActionResult): { text: string; fields?: ResultField[] } {
+  return typeof result === "string" ? { text: result } : result;
 }
 
 function mapParamType(t: string): FormField["type"] {
