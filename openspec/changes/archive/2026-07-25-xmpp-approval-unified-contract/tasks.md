@@ -107,6 +107,16 @@
       cliente viejo sigue leyendo el `<note>` sin romperse). Publicación/
       instalación real en dispositivos queda a criterio del usuario, fuera
       del alcance de lo que un agente puede verificar desde este entorno.
+      **Actualización 2026-07-25 (misma sesión):** desplegado a producción.
+      `/opt/claudio-w/extensions-xmpp-src/` seguía en el baseline pre-Fase-2
+      (verificado: hash idéntico al commit `4c95469`) — el push a git nunca
+      sincroniza ese árbol, se copia a mano por SSH (Fase 4 del programa,
+      pendiente). Backup en
+      `/opt/claudio-w/backups/xmpp-approval-unified-contract-20260725T231232Z/`,
+      copiados `src/{actions,xep-0050,approval-bypass}.ts` + `index.ts`,
+      `node --check` OK en los 4, `systemctl --user restart
+      claudio-w-openclaw.service`: arranque limpio, 12/12 parches
+      "ya aplicado", 8 cuentas XMPP conectadas, sin errores en logs.
 - [x] 6.3 `ROADMAP.md` actualizado con el cierre de esta fase.
 - [x] 6.4 `xmpp-approval-loose-ends/tasks.md` actualizado: el aviso de
       estado ahora dice explícitamente que ya fue absorbido y cerrado (no
