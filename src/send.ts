@@ -678,12 +678,42 @@ export async function sendFileXmpp(
   const bodyText = caption
     ? `${caption}\n\n[${label}] ${filename}: ${uploadResult.getUrl}`
     : `[${label}] ${filename}: ${uploadResult.getUrl}`;
+  // XEP-0385 (Stateless Inline Media Sharing) + XEP-0428 (Fallback
+  // Indication): plain jabber:x:oob is enough per spec, but clients seen in
+  // the wild (Dino, Gajim) only auto-preview images in MUC rooms when the
+  // richer <reference><media-sharing> shape declares content-type/size/hash
+  // up front -- Cheogram already sends this on inbound attachments we
+  // receive. Without it, occupants only get a clickable link, never an
+  // inline image, even though the OOB url itself is valid and reachable.
+  const sha256Hash = crypto.createHash("sha256").update(media.buffer).digest("base64");
   await connection.send(
     xml(
       "message",
       { type, to: target, id },
       xml("body", {}, bodyText),
       xml("x", { xmlns: "jabber:x:oob" }, xml("url", {}, uploadResult.getUrl)),
+      xml(
+        "reference",
+        { xmlns: "urn:xmpp:reference:0", type: "data" },
+        xml(
+          "media-sharing",
+          { xmlns: "urn:xmpp:sims:1" },
+          xml(
+            "file",
+            { xmlns: "urn:xmpp:jingle:apps:file-transfer:5" },
+            xml("media-type", {}, media.contentType ?? "application/octet-stream"),
+            xml("name", {}, filename),
+            xml("size", {}, String(media.buffer.length)),
+            xml("hash", { xmlns: "urn:xmpp:hashes:2", algo: "sha-256" }, sha256Hash),
+          ),
+          xml(
+            "sources",
+            {},
+            xml("reference", { xmlns: "urn:xmpp:reference:0", type: "data", uri: uploadResult.getUrl }),
+          ),
+        ),
+      ),
+      xml("fallback", { xmlns: "urn:xmpp:fallback:0", for: "jabber:x:oob" }, xml("body", {})),
     ),
   );
   recordXmppOutboundActivity(account.accountId);
