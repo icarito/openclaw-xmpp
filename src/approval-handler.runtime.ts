@@ -222,6 +222,26 @@ function isXmppAccountConfiguredForApprovals(params: { cfg: CoreConfig; accountI
   return resolveInlineButtonsScope(account.config.capabilities) !== "off";
 }
 
+/**
+ * Redirige aprobaciones que iban a un canal compartido (`channel:<room>`)
+ * hacia `account.config.approvalDmJid` cuando está configurado. Los
+ * comandos exec y sus decisiones son para el operador humano, no para cada
+ * ocupante de una sala MUC — sin esto, cualquiera en el grupo ve el
+ * comando exacto que el agente quiere correr y puede aprobarlo/denegarlo.
+ * Pasa el target tal cual cuando ya es un DM, o cuando la cuenta no tiene
+ * `approvalDmJid` configurado (comportamiento anterior sin cambios).
+ */
+function resolveApprovalDeliveryTarget(params: {
+  cfg: CoreConfig;
+  accountId?: string;
+  plannedTo: string;
+}): string {
+  if (!params.plannedTo.startsWith("channel:")) return params.plannedTo;
+  const account = resolveXmppAccount({ cfg: params.cfg, accountId: params.accountId });
+  const dmJid = normalizeOptionalString(account.config.approvalDmJid);
+  return dmJid || params.plannedTo;
+}
+
 /** An approval belongs to this XMPP account only if the originating turn was XMPP on the same account.
  *
  *  Esta función es PURA: decide, no marca. El guard de sesión
@@ -464,10 +484,20 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
         );
       }
       const deliveryAccountId = pendingPayload.accountId || preparedTarget.accountId || accountId;
-      log.info(`xmpp approvals: delivering pending card to=${preparedTarget.to} account=${deliveryAccountId ?? "default"}`);
+      // Approval prompts are for the human operator, not the room: redirect
+      // to approvalDmJid when the planned target is a shared MUC channel,
+      // so exec/plugin approvals (and the commands they reveal) aren't
+      // visible to every occupant. Falls through to the room unchanged if
+      // approvalDmJid isn't configured, or the target is already a DM.
+      const approvalTarget = resolveApprovalDeliveryTarget({
+        cfg: cfg as CoreConfig,
+        accountId: deliveryAccountId,
+        plannedTo: preparedTarget.to,
+      });
+      log.info(`xmpp approvals: delivering pending card to=${approvalTarget} account=${deliveryAccountId ?? "default"}`);
       const { sendPayloadXmpp } = await loadXmppSendRuntime();
       const result = await sendPayloadXmpp(
-        preparedTarget.to,
+        approvalTarget,
         pendingPayload.text,
         {
           text: pendingPayload.text,

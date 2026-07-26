@@ -48,6 +48,15 @@ export type XmppAccountConfig = {
   mucDomain?: string;
   /** Bare JIDs of MUC rooms to auto-join on connect. */
   mucRooms?: string[];
+  /**
+   * Bare JID to redirect exec/plugin approval cards to instead of the room
+   * they were triggered from. Approval prompts (and their allow/deny
+   * decisions) are meant for the human operator, not for every occupant of
+   * a shared MUC room — without this, a group's exec approvals are visible
+   * to everyone in it. Only affects delivery target; approval logic and
+   * session scoping are unchanged.
+   */
+  approvalDmJid?: string;
   dmPolicy?: DmPolicy;
   allowFrom?: Array<string | number>;
   defaultTo?: string;

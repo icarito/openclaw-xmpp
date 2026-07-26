@@ -15,6 +15,7 @@ import {
   resolveChannelPreviewStreamMode,
 } from "openclaw/plugin-sdk/channel-outbound";
 import type { ResolvedXmppAccount } from "./accounts.js";
+import { isGroupJid } from "./normalize.js";
 import { markdownToPlain, XMPP_MAX_BODY } from "./protocol.js";
 import { sendEditXmpp, sendMessageXmpp, sendPayloadXmpp } from "./send.js";
 import type { CoreConfig } from "./types.js";
@@ -58,7 +59,18 @@ export function createXmppProgressController(params: {
   // burbuja transmite el TEXTO de la respuesta en vivo además de las líneas
   // de tools, y al final se convierte en la respuesta (previewFinalization).
   // streaming.mode = "progress" deja sólo líneas de tools; "off" desactiva.
-  const mode = resolveChannelPreviewStreamMode(entry, "partial");
+  //
+  // En salas MUC forzamos "off" sin importar la config de la cuenta: este
+  // mecanismo depende de XEP-0308 (Last Message Correction) para colapsar
+  // todas las actualizaciones en una sola burbuja, y varios clientes reales
+  // (confirmado con Dino) no aplican LMC a mensajes ajenos dentro de una
+  // sala aunque sí lo hagan en 1:1 — cada edición se les muestra como un
+  // mensaje nuevo, así que "una burbuja que se actualiza" se convierte en
+  // "N mensajes" para esos ocupantes. Sin filas de progreso, el turno
+  // entero llega como un único mensaje final (ver flushNow/finalize más
+  // abajo), que sí es universalmente compatible.
+  const isMucTarget = isGroupJid(params.target, params.account.mucDomain);
+  const mode = isMucTarget ? "off" : resolveChannelPreviewStreamMode(entry, "partial");
   const active = mode !== "off";
   const partialEnabled = mode === "partial";
   const sendOpts = { cfg: params.cfg, accountId: params.account.accountId };
