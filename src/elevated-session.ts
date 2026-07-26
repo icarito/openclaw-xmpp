@@ -1,19 +1,27 @@
-// Host-side XMPP command for a TEMPORARY, session-scoped exec approval
-// bypass. Distinct from approval-mode.ts: that command edits openclaw.json
-// on disk and requires a gateway restart to apply (agent-wide, persistent).
-// This command patches the invoking session's execSecurity/execAsk directly
-// in the session store (getSessionEntry/patchSessionEntry from
-// openclaw/plugin-sdk/session-store-runtime), which the core re-reads every
-// turn via resolveExecDefaults -- no restart, no config file write, and
-// scoped to one session rather than the whole agent.
+// Host-side XMPP command for a TEMPORARY, session-scoped elevated bypass.
+// Replaces the earlier, independently-invented approval-bypass.ts (which
+// patched execSecurity/execAsk directly) and approval-mode.ts (agent-wide,
+// persistent, required a gateway restart) -- see
+// xmpp-elevated-session-command proposal.md for the consolidation
+// rationale. This is now the ONLY session-scoped bypass mechanism exposed
+// by this plugin.
+//
+// This command sets the invoking session's elevatedLevel (the core-native
+// override mechanism backed by SessionEntry.elevatedLevel) to "full" via
+// getSessionEntry/patchSessionEntry from
+// openclaw/plugin-sdk/session-store-runtime, which the core re-reads every
+// turn -- no restart, no config file write, and scoped to one session
+// rather than the whole agent. The core resolves bypassApprovals from
+// elevatedLevel:"full" provided exec-approvals.json's security/ask do not
+// explicitly block it (a host-level prerequisite outside this plugin's
+// control -- see OPERATIONS.md).
 //
 // The in-memory timer (`activeBypasses`) is the fast path when the gateway
-// process does not restart. The bypass's expiration and pre-bypass policy
-// are ALSO persisted in the session store under
-// pluginExtensions.xmpp.approvalBypass -- see xmpp-approval-unified-contract
-// design.md D3. This is what turns a restart during an active bypass into
-// fail-closed instead of fail-open (the previous, accepted behavior): the
-// timer is lost on restart, but sweepExpiredApprovalBypasses() reads the
+// process does not restart. The bypass's expiration and pre-bypass
+// elevatedLevel are ALSO persisted in the session store under
+// pluginExtensions.xmpp.elevatedBypass -- this is what turns a restart
+// during an active bypass into fail-closed instead of fail-open: the timer
+// is lost on restart, but sweepExpiredElevatedBypasses() reads the
 // persisted record on plugin load and reverts anything already expired.
 import {
   getSessionEntry,
@@ -30,28 +38,29 @@ import type { CoreConfig } from "./types.js";
 const DEFAULT_BYPASS_MINUTES = 10;
 const MAX_BYPASS_MINUTES = 60;
 
-const BYPASS_EXEC_SECURITY = "full";
-const BYPASS_EXEC_ASK = "off";
+// The only elevatedLevel this command ever writes. The core's ElevatedLevel
+// union also has "on"/"ask", but exposing those here would recreate the
+// multi-mechanism confusion this change removes -- on/off/status is a
+// binary bypass, not a level picker (see design.md D2).
+const BYPASS_ELEVATED_LEVEL = "full";
 
 const PLUGIN_NAMESPACE = "xmpp";
-const BYPASS_EXTENSION_KEY = "approvalBypass";
+const BYPASS_EXTENSION_KEY = "elevatedBypass";
 
 type BypassEntry = {
   sessionKey: string;
-  previousExecSecurity: string | undefined;
-  previousExecAsk: string | undefined;
+  previousElevatedLevel: string | undefined;
   expiresAtMs: number;
   timer: ReturnType<typeof setTimeout>;
 };
 
-/** Shape persisted under `SessionEntry.pluginExtensions.xmpp.approvalBypass`.
+/** Shape persisted under `SessionEntry.pluginExtensions.xmpp.elevatedBypass`.
  *  Plain JSON (string | number | null, no undefined) -- SessionPluginJsonValue
- *  doesn't accept undefined, so the previous-policy fields use null when
+ *  doesn't accept undefined, so the previous-level field uses null when
  *  there was no prior value to restore. */
 type PersistedBypass = {
   expiresAtMs: number;
-  previousExecSecurity: string | null;
-  previousExecAsk: string | null;
+  previousElevatedLevel: string | null;
 };
 
 // In-memory only, by design -- see module header. Keyed by sessionKey, not
@@ -95,7 +104,7 @@ function clearPersistedBypass(entry: Pick<SessionEntry, "pluginExtensions"> | un
   };
 }
 
-/** Reverts one session's exec policy to its pre-bypass value, clears the
+/** Reverts one session's elevatedLevel to its pre-bypass value, clears the
  *  tracked in-memory entry (if any) and the persisted record. Shared by
  *  mode=off, the expiry timer, and the startup sweep -- so there is exactly
  *  one code path that performs a reversion, regardless of which of the
@@ -103,8 +112,7 @@ function clearPersistedBypass(entry: Pick<SessionEntry, "pluginExtensions"> | un
 async function revertBypass(params: {
   agentId: string;
   sessionKey: string;
-  previousExecSecurity: string | undefined;
-  previousExecAsk: string | undefined;
+  previousElevatedLevel: string | undefined;
   timer?: ReturnType<typeof setTimeout>;
 }): Promise<void> {
   if (params.timer) clearTimeout(params.timer);
@@ -113,8 +121,7 @@ async function revertBypass(params: {
     agentId: params.agentId,
     sessionKey: params.sessionKey,
     update: (entry) => ({
-      execSecurity: params.previousExecSecurity,
-      execAsk: params.previousExecAsk,
+      elevatedLevel: params.previousElevatedLevel,
       pluginExtensions: clearPersistedBypass(entry),
     }),
   });
@@ -130,7 +137,7 @@ async function revertBypass(params: {
  * record end to end, so there is no core state to reconcile against -- only
  * the plugin's own persisted state to read and act on locally.
  */
-export async function sweepExpiredApprovalBypasses(): Promise<{ reverted: number }> {
+export async function sweepExpiredElevatedBypasses(): Promise<{ reverted: number }> {
   const nowMs = Date.now();
   const entries = listSessionEntries({});
   let reverted = 0;
@@ -147,8 +154,7 @@ export async function sweepExpiredApprovalBypasses(): Promise<{ reverted: number
     await revertBypass({
       agentId,
       sessionKey,
-      previousExecSecurity: persisted.previousExecSecurity ?? undefined,
-      previousExecAsk: persisted.previousExecAsk ?? undefined,
+      previousElevatedLevel: persisted.previousElevatedLevel ?? undefined,
     });
     reverted += 1;
   }
@@ -163,7 +169,7 @@ function deriveAgentIdFromSessionKey(sessionKey: string): string | undefined {
   return match?.[1];
 }
 
-export function buildApprovalBypassAction(params: {
+export function buildElevatedSessionAction(params: {
   account: ResolvedXmppAccount;
   cfg: CoreConfig;
   node?: string;
@@ -172,13 +178,14 @@ export function buildApprovalBypassAction(params: {
 }): XmppAction {
   const { account, cfg } = params;
   return {
-    node: params.node ?? "approval-bypass",
-    name: params.name ?? "Approvals: temporary bypass",
+    node: params.node ?? "elevated",
+    name: params.name ?? "Elevated: temporary session bypass",
     description:
       params.description ??
-      "Relaja las aprobaciones de exec SOLO para esta conversación, por N minutos (default "
-        + `${DEFAULT_BYPASS_MINUTES}, máximo ${MAX_BYPASS_MINUTES}). Se revierte solo al expirar, `
-        + "sin reiniciar el gateway. Para bypass permanente de todo el agente usa approval-mode full.",
+      "Activa el nivel elevado nativo (elevatedLevel=full) SOLO para esta conversacion, "
+        + `por N minutos (default ${DEFAULT_BYPASS_MINUTES}, maximo ${MAX_BYPASS_MINUTES}). `
+        + "Se revierte solo al expirar, sin reiniciar el gateway. Unico mecanismo de bypass "
+        + "de sesion expuesto por este plugin.",
     params: [
       {
         name: "mode",
@@ -217,10 +224,10 @@ export function buildApprovalBypassAction(params: {
 
       if (mode === "status") {
         if (!existing) {
-          return { text: "Bypass: inactivo para esta conversacion.", fields: [{ var: "active", value: "false" }] };
+          return { text: "Elevated: inactivo para esta conversacion.", fields: [{ var: "active", value: "false" }] };
         }
         return {
-          text: `Bypass: activo, quedan ${formatRemaining(existing.expiresAtMs, nowMs)}.`,
+          text: `Elevated: activo, quedan ${formatRemaining(existing.expiresAtMs, nowMs)}.`,
           fields: [
             { var: "active", value: "true" },
             { var: "scope", value: "session" },
@@ -239,15 +246,14 @@ export function buildApprovalBypassAction(params: {
       }
 
       if (mode === "off") {
-        if (!existing) return "Bypass: ya estaba inactivo para esta conversacion.";
+        if (!existing) return "Elevated: ya estaba inactivo para esta conversacion.";
         await revertBypass({
           agentId: route.agentId,
           sessionKey: existing.sessionKey,
-          previousExecSecurity: existing.previousExecSecurity,
-          previousExecAsk: existing.previousExecAsk,
+          previousElevatedLevel: existing.previousElevatedLevel,
           timer: existing.timer,
         });
-        return "Bypass: desactivado. Policy de exec restaurada.";
+        return "Elevated: desactivado. elevatedLevel restaurado.";
       }
 
       // mode === "on"
@@ -270,8 +276,7 @@ export function buildApprovalBypassAction(params: {
       }
 
       const currentEntry = getSessionEntry({ agentId: route.agentId, sessionKey: route.sessionKey });
-      const previousExecSecurity = existing ? existing.previousExecSecurity : currentEntry?.execSecurity;
-      const previousExecAsk = existing ? existing.previousExecAsk : currentEntry?.execAsk;
+      const previousElevatedLevel = existing ? existing.previousElevatedLevel : currentEntry?.elevatedLevel ?? undefined;
 
       const expiresAtMs = nowMs + minutes * 60_000;
       const timer = setTimeout(() => {
@@ -280,10 +285,9 @@ export function buildApprovalBypassAction(params: {
         void revertBypass({
           agentId: route.agentId,
           sessionKey: entry.sessionKey,
-          previousExecSecurity: entry.previousExecSecurity,
-          previousExecAsk: entry.previousExecAsk,
+          previousElevatedLevel: entry.previousElevatedLevel,
         }).catch(() => {
-          // Best-effort: if this fails, the session stays relaxed until a
+          // Best-effort: if this fails, the session stays elevated until a
           // manual "off", a future bypass replacing it, or the startup
           // sweep on the next process start (the persisted record survives
           // even if this in-memory revert failed).
@@ -292,8 +296,7 @@ export function buildApprovalBypassAction(params: {
 
       activeBypasses.set(route.sessionKey, {
         sessionKey: route.sessionKey,
-        previousExecSecurity,
-        previousExecAsk,
+        previousElevatedLevel,
         expiresAtMs,
         timer,
       });
@@ -302,16 +305,14 @@ export function buildApprovalBypassAction(params: {
         agentId: route.agentId,
         sessionKey: route.sessionKey,
         update: (entry) => ({
-          execSecurity: BYPASS_EXEC_SECURITY,
-          execAsk: BYPASS_EXEC_ASK,
+          elevatedLevel: BYPASS_ELEVATED_LEVEL,
           pluginExtensions: {
             ...entry.pluginExtensions,
             [PLUGIN_NAMESPACE]: {
               ...entry.pluginExtensions?.[PLUGIN_NAMESPACE],
               [BYPASS_EXTENSION_KEY]: {
                 expiresAtMs,
-                previousExecSecurity: previousExecSecurity ?? null,
-                previousExecAsk: previousExecAsk ?? null,
+                previousElevatedLevel: previousElevatedLevel ?? null,
               } satisfies PersistedBypass,
             },
           },
@@ -319,9 +320,9 @@ export function buildApprovalBypassAction(params: {
       });
 
       return [
-        `Bypass: activado por ${minutes} min${clampNotice}.`,
+        `Elevated: activado por ${minutes} min${clampNotice}.`,
         "Alcance: solo esta conversacion, no todo el agente.",
-        "Se revierte solo al expirar, o con approval-bypass off.",
+        "Se revierte solo al expirar, o con elevated off.",
       ].join("\n");
     },
   };

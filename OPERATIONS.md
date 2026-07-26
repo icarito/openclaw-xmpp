@@ -1,78 +1,83 @@
 # XMPP gateway operations
 
-## Approval modes: one concept, four scopes
+## Approval modes: one concept, three scopes
 
 There is one question -- "let this agent/session/command run without asking
-me" -- answered at four different scopes, not four competing mechanisms.
+me" -- answered at three different scopes, not three competing mechanisms.
 Pick the row that matches how much you want relaxed and for how long:
 
 | Scope | Mechanism | Persistence | Restart needed? |
 |---|---|---|---|
-| This conversation, for N minutes | `approval-bypass` (below) | session store + durable record, survives a gateway restart | No |
-| This session, until changed | `elevated` (OpenClaw core native command; not yet exposed via XEP-0050 in this plugin -- planned, see `xmpp-parity-baseline` Phase 3) | `SessionEntry.elevatedLevel` | No |
-| This agent, permanently | `approval-mode` (below) | `openclaw.json` on disk | **Yes** |
+| This conversation, for N minutes | `elevated` (below) | session store + durable record, survives a gateway restart | No |
 | Specific commands, permanently | `exec-approvals.json` allowlist (below) | file | Yes |
+| This agent, permanently | direct edit of `exec-approvals.json`/`openclaw.json` | file | Yes |
 
 Nothing here is a fallback for something broken -- each row solves a
 genuinely different situation, and none of them starts an agent turn, so
 changing approval policy can never itself trigger an approval loop.
 
-### `approval-mode` and `approval-bypass`
+This used to be four scopes across four mechanisms (`approval-bypass`,
+`approval-mode`, the core-native `elevated`, and the allowlist), with the
+first three overlapping in confusing ways -- `approval-bypass` and
+`approval-mode` were plugin-invented duplicates of the session-scoped and
+agent-wide cases the core-native `elevated` mechanism already covered.
+`xmpp-elevated-session-command` consolidated on `elevated` as the only
+session-scoped bypass exposed by this plugin, and retired the other two: the
+agent-wide, permanent case is served just as well by editing
+`exec-approvals.json`/`openclaw.json` directly (as already done for the
+production fix on 2026-07-26), without a dedicated XMPP command that
+required the same manual gateway restart anyway.
 
-The two ad-hoc command nodes documented in detail below:
+### `elevated`
 
-- `approval-mode`: agent-wide, persistent policy change. Edits
-  `openclaw.json` on disk (`tools.exec`); requires restarting
-  `claudio-w-openclaw.service` for the running gateway process to pick it
-  up. Affects every session of the agent, on every channel.
-- `approval-bypass`: session-scoped, temporary policy relaxation. Patches
-  `execSecurity`/`execAsk` directly on the invoking session's entry in the
-  session store (in-process, via `getSessionEntry`/`patchSessionEntry` from
-  `openclaw/plugin-sdk/session-store-runtime`) -- no config file write, no
-  restart. Auto-reverts after a configurable number of minutes (default 10,
-  max 60) via an in-memory timer in the plugin process; can also be turned
-  off early. The expiration and pre-bypass policy are ALSO persisted in the
-  session store (`pluginExtensions.xmpp.approvalBypass`): if the gateway
-  restarts while a bypass is active, a sweep on plugin load reverts any
-  bypass whose expiration has already passed, restoring the recorded
-  pre-bypass policy -- fail-closed, not fail-open (see openspec change
-  `xmpp-approval-unified-contract` design.md for the full rationale; this
-  replaces the earlier fail-open-on-restart behavior documented in the now
-  archived `xmpp-approval-bypass-and-fallback-cleanup`).
+The ad-hoc command node documented in detail below:
 
-`approval-bypass status` returns both a human-readable note and a structured
+- `elevated`: session-scoped, temporary policy relaxation. Sets
+  `elevatedLevel` to `"full"` directly on the invoking session's entry in
+  the session store (in-process, via `getSessionEntry`/`patchSessionEntry`
+  from `openclaw/plugin-sdk/session-store-runtime`) -- no config file write,
+  no restart. This is the same `SessionEntry.elevatedLevel` the OpenClaw
+  core already reads every turn to resolve `bypassApprovals`; this plugin
+  does not invent a parallel exec-policy field. Auto-reverts after a
+  configurable number of minutes (default 10, max 60) via an in-memory timer
+  in the plugin process; can also be turned off early. The expiration and
+  pre-bypass `elevatedLevel` are ALSO persisted in the session store
+  (`pluginExtensions.xmpp.elevatedBypass`): if the gateway restarts while a
+  bypass is active, a sweep on plugin load reverts any bypass whose
+  expiration has already passed, restoring the recorded pre-bypass level --
+  fail-closed, not fail-open.
+
+**Prerequisite outside this plugin's control**: `elevatedLevel:"full"` only
+actually bypasses approvals if the agent's `exec-approvals.json` does not
+have `security`/`ask` explicitly set to something that blocks it (e.g.
+`security:"allowlist"`, `ask:"on-miss"` win over the elevated override). If
+`elevated on` reports success but exec commands still show an approval card,
+check that file's `defaults` (or the agent's own override) before assuming
+this command is broken -- this exact bug was found and fixed in production
+on 2026-07-26.
+
+`elevated status` returns both a human-readable note and a structured
 XEP-0004 `type="result"` form (`active`, `mode`, `expires-at-ms`,
 `remaining-seconds`) attached to the same XEP-0050 command result -- clients
 that want to consume the state programmatically should read the form fields,
 not parse the note text.
 
-Both are available through XEP-0050 when the client targets the gateway's
-full resource JID, and through the universal textual fallback:
+Available through XEP-0050 when the client targets the gateway's full
+resource JID, and through the universal textual fallback:
 
 ```text
-/oc approval-mode status
-/oc approval-mode auto
-/oc approval-bypass on 10
-/oc approval-bypass status
-/oc approval-bypass off
+/oc elevated on 10
+/oc elevated status
+/oc elevated off
 ```
 
-`approval-mode` supported `mode` values:
-
-- `status`: report the current exec policy.
-- `ask`: restore human approval for exec misses.
-- `auto` or `on`: use conservative allowlist mode with `ask=on-miss` and the
-  flash reviewer (`kilo/deepseek-v4-flash`). Trivial commands may pass through
-  the allowlist; command misses are reviewed and fall back to human approval on
-  risk, timeout, or uncertainty.
-- `full`: broad bypass for short emergency windows only, manual revert.
-- `deny`: block exec through core policy.
-- `off`: compatibility value that maps back to `ask`.
-
-`approval-bypass` supported `mode` values:
+`elevated` supported `mode` values:
 
 - `on`: activate the bypass for this session, for `minutes` (default 10, max
-  60).
+  60). Always sets `elevatedLevel:"full"` -- the core's other levels
+  (`on`/`ask`) are not exposed as options here, since this command answers a
+  binary "bypassed or not" question, not a level picker (see
+  `xmpp-elevated-session-command` design.md D2 for the rationale).
 - `off`: revert immediately and cancel the pending auto-reversion timer.
 - `status`: report whether a bypass is active for this session and, if so,
   the remaining time.
@@ -130,12 +135,12 @@ same as `openclaw.json`. This scales to any agent on any OpenClaw deployment
 that has its own `exec-approvals.json`, not only claudio-w's.
 
 For a faster, temporary alternative that doesn't touch this file at all, use
-`approval-bypass` (above) for a short investigation window instead of
-permanently widening the allowlist.
+`elevated` (above) for a short investigation window instead of permanently
+widening the allowlist.
 
-After a mutating `approval-mode` command, restart `claudio-w-openclaw.service`
-for the running gateway process to pick up the edited `openclaw.json`.
-`approval-bypass` never requires a restart.
+A direct edit of `exec-approvals.json`/`openclaw.json` (agent-wide,
+permanent) requires restarting `claudio-w-openclaw.service` for the running
+gateway process to pick it up. `elevated` never requires a restart.
 
 ## Approval cards
 

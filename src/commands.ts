@@ -24,15 +24,13 @@
 //     but wiring it fully requires passing skillCommands into
 //     inbound.ts's hasControlCommand/shouldHandleTextCommands call sites,
 //     which is deeper surgery than this pass covers -- see PORT-NOTES.md.
-//   - approval-mode -- LIVE. Host-side command that edits tools.exec policy
-//     (openclaw.json, agent-wide, requires gateway restart) without waking
-//     an agent, so routine policy changes do not themselves create approval
-//     loops.
-//   - approval-bypass -- LIVE (added after the original NanoClaw port pass;
-//     see openspec change xmpp-approval-bypass-and-fallback-cleanup).
-//     Session-scoped, in-memory TTL, no restart -- a different mechanism
-//     from NanoClaw's original modules/approvals/bypass.ts (not a
-//     mechanical port of it), built on the session store instead.
+//   - approval-mode / approval-bypass -- REMOVED (xmpp-elevated-session-
+//     command). These two host-side commands (agent-wide/config-file and
+//     session-scoped/in-memory-TTL respectively) were replaced by a single
+//     `elevated` command: both resolved the same "relax exec approval"
+//     need as the core-native elevated override (SessionEntry.elevatedLevel)
+//     already did, without this plugin exposing it -- see
+//     elevated-session.ts and OPERATIONS.md for the consolidated model.
 // What IS live: the XEP-0050/XEP-0004 protocol machinery itself (xep-0050.ts,
 // xep-0004.ts), the textual /oc fallback, and now the five native session
 // commands via native-commands.ts. Typed /clear remains a compatibility alias
@@ -41,8 +39,7 @@ import type { Element } from "@xmpp/xml";
 import { xml } from "@xmpp/client";
 import { buildModelsProviderData } from "openclaw/plugin-sdk/models-provider-runtime";
 import type { ResolvedXmppAccount } from "./accounts.js";
-import { buildApprovalModeAction } from "./approval-mode.js";
-import { buildApprovalBypassAction } from "./approval-bypass.js";
+import { buildElevatedSessionAction } from "./elevated-session.js";
 import { createActionDispatcher, type XmppAction } from "./actions.js";
 import { buildAbortAction, buildNativeCommandActions, dispatchNativeCommandText, tryResolveXmppApprovalCommand } from "./native-commands.js";
 import { Xep0050Handler } from "./xep-0050.js";
@@ -128,8 +125,7 @@ function buildAccountActions(params: {
     // uses for its slash commands.
     ...buildNativeCommandActions({ account, cfg, runtime }),
     ...buildAbortAction({ account, cfg, runtime }),
-    buildApprovalModeAction({ account, cfg }),
-    buildApprovalBypassAction({ account, cfg }),
+    buildElevatedSessionAction({ account, cfg }),
   ];
 }
 

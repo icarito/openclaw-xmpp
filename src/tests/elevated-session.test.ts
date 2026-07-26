@@ -1,10 +1,12 @@
-// Tarea 2.9 de xmpp-approval-bypass-and-fallback-cleanup: cubre los
-// escenarios de specs/xmpp-approval-bypass/spec.md (activación,
+// Cubre los escenarios de specs/xmpp-elevated-session/spec.md (activación,
 // auto-reversión con timers falseados, desactivación manual, status, clamp
-// de máximo, sender no autorizado).
+// de máximo, sender no autorizado, preservación de elevatedLevel previo no
+// default). Reemplaza approval-bypass.test.ts tras la consolidación de
+// xmpp-elevated-session-command: mismos escenarios, ahora sobre
+// elevatedLevel en vez de execSecurity/execAsk.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const sessionStore = new Map<string, { execSecurity?: string; execAsk?: string }>();
+const sessionStore = new Map<string, { elevatedLevel?: string }>();
 
 vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
   getSessionEntry: vi.fn(({ sessionKey }: { sessionKey: string }) => sessionStore.get(sessionKey)),
@@ -15,8 +17,8 @@ vi.mock("openclaw/plugin-sdk/session-store-runtime", () => ({
     sessionStore.set(sessionKey, next);
     return next;
   }),
-  // Importado por approval-bypass.ts (para el barrido al arranque) pero no
-  // ejercitado por estos tests -- ver src/tests/approval-bypass-sweep.test.ts.
+  // Importado por elevated-session.ts (para el barrido al arranque) pero no
+  // ejercitado por estos tests -- ver src/tests/elevated-session-sweep.test.ts.
   listSessionEntries: vi.fn(() => []),
 }));
 
@@ -34,7 +36,7 @@ vi.mock("openclaw/plugin-sdk/routing", () => ({
   })),
 }));
 
-import { buildApprovalBypassAction } from "../approval-bypass.js";
+import { buildElevatedSessionAction } from "../elevated-session.js";
 import type { ResolvedXmppAccount } from "../accounts.js";
 import type { CoreConfig } from "../types.js";
 
@@ -44,23 +46,23 @@ function makeAccount(allowFrom: string[]): ResolvedXmppAccount {
   return { config: { allowFrom } } as unknown as ResolvedXmppAccount;
 }
 
-// mode=status devuelve {text, fields} desde la Fase 2 (xmpp-approval-unified-
-// contract); mode=on/off siguen devolviendo string plano. Este helper lee el
-// texto legible sin importar cuál shape haya devuelto el handler --
-// equivalente al normalizeActionResult() que usa xep-0050.ts en producción.
-function resultText(result: Awaited<ReturnType<ReturnType<typeof buildApprovalBypassAction>["handler"]>>): string {
+// mode=status devuelve {text, fields}; mode=on/off siguen devolviendo string
+// plano. Este helper lee el texto legible sin importar cuál shape haya
+// devuelto el handler -- equivalente al normalizeActionResult() que usa
+// xep-0050.ts en producción.
+function resultText(result: Awaited<ReturnType<ReturnType<typeof buildElevatedSessionAction>["handler"]>>): string {
   return typeof result === "string" ? result : result.text;
 }
 
 function resultField(
-  result: Awaited<ReturnType<ReturnType<typeof buildApprovalBypassAction>["handler"]>>,
+  result: Awaited<ReturnType<ReturnType<typeof buildElevatedSessionAction>["handler"]>>,
   name: string,
 ): string | undefined {
   if (typeof result === "string") return undefined;
   return result.fields?.find((f) => f.var === name)?.value;
 }
 
-// approval-bypass.ts mantiene su Map `activeBypasses` a nivel de módulo, por
+// elevated-session.ts mantiene su Map `activeBypasses` a nivel de módulo, por
 // diseño (estado in-memory, ver header del módulo) -- no está exportado para
 // testearse directo. Cada test usa una sessionKey única (vía este contador)
 // para no heredar el estado de bypass activado por un test previo, igual que
@@ -72,7 +74,7 @@ function freshSessionKey(): string {
   return currentSessionKey;
 }
 
-describe("approval-bypass", () => {
+describe("elevated-session", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     sessionStore.clear();
@@ -82,18 +84,18 @@ describe("approval-bypass", () => {
     vi.useRealTimers();
   });
 
-  it("activa el bypass y patchea execSecurity/execAsk relajados", async () => {
+  it("activa el bypass y patchea elevatedLevel a full", async () => {
     const SESSION_KEY = freshSessionKey();
-    const action = buildApprovalBypassAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
+    const action = buildElevatedSessionAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
     const result = await action.handler({ mode: "on", minutes: "10" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
 
     expect(String(result)).toContain("activado");
-    expect(sessionStore.get(SESSION_KEY)).toMatchObject({ execSecurity: "full", execAsk: "off" });
+    expect(sessionStore.get(SESSION_KEY)).toMatchObject({ elevatedLevel: "full" });
   });
 
   it("mode=status reporta activo con tiempo restante mientras el bypass no expiró", async () => {
     freshSessionKey();
-    const action = buildApprovalBypassAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
+    const action = buildElevatedSessionAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
     await action.handler({ mode: "on", minutes: "10" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
 
     vi.advanceTimersByTime(60_000);
@@ -107,13 +109,13 @@ describe("approval-bypass", () => {
 
   it("auto-revierte al vencer la duración, sin necesitar otro comando", async () => {
     const SESSION_KEY = freshSessionKey();
-    const action = buildApprovalBypassAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
+    const action = buildElevatedSessionAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
     await action.handler({ mode: "on", minutes: "1" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
-    expect(sessionStore.get(SESSION_KEY)).toMatchObject({ execSecurity: "full", execAsk: "off" });
+    expect(sessionStore.get(SESSION_KEY)).toMatchObject({ elevatedLevel: "full" });
 
     await vi.advanceTimersByTimeAsync(60_000);
 
-    expect(sessionStore.get(SESSION_KEY)?.execSecurity).not.toBe("full");
+    expect(sessionStore.get(SESSION_KEY)?.elevatedLevel).not.toBe("full");
     const status = await action.handler({ mode: "status" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
     expect(resultText(status)).toContain("inactivo");
     expect(resultField(status, "active")).toBe("false");
@@ -121,12 +123,12 @@ describe("approval-bypass", () => {
 
   it("mode=off revierte de inmediato y cancela el timer de auto-reversión", async () => {
     const SESSION_KEY = freshSessionKey();
-    const action = buildApprovalBypassAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
+    const action = buildElevatedSessionAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
     await action.handler({ mode: "on", minutes: "10" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
 
     const off = await action.handler({ mode: "off" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
     expect(String(off)).toContain("desactivado");
-    expect(sessionStore.get(SESSION_KEY)?.execSecurity).not.toBe("full");
+    expect(sessionStore.get(SESSION_KEY)?.elevatedLevel).not.toBe("full");
 
     // Si el timer no se hubiera cancelado, avanzar el reloj lanzaría una
     // segunda reversión sobre un entry ya borrado -- no debe pasar nada.
@@ -137,7 +139,7 @@ describe("approval-bypass", () => {
 
   it("clampea minutes por encima del máximo configurado y lo informa", async () => {
     freshSessionKey();
-    const action = buildApprovalBypassAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
+    const action = buildElevatedSessionAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
     const result = await action.handler({ mode: "on", minutes: "999" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
 
     expect(String(result)).toMatch(/ajustado al maximo/);
@@ -146,7 +148,7 @@ describe("approval-bypass", () => {
 
   it("rechaza mode=on de un sender fuera de allowFrom, sin mutar la sesión", async () => {
     const SESSION_KEY = freshSessionKey();
-    const action = buildApprovalBypassAction({ account: makeAccount(["otro@example.org"]), cfg: {} as CoreConfig });
+    const action = buildElevatedSessionAction({ account: makeAccount(["otro@example.org"]), cfg: {} as CoreConfig });
 
     await expect(
       action.handler({ mode: "on", minutes: "10" }, { fromJid: AUTHORIZED_JID, accountId: "default" }),
@@ -156,9 +158,28 @@ describe("approval-bypass", () => {
 
   it("mode=status no requiere autorización -- cualquier sender puede consultar", async () => {
     freshSessionKey();
-    const action = buildApprovalBypassAction({ account: makeAccount(["otro@example.org"]), cfg: {} as CoreConfig });
+    const action = buildElevatedSessionAction({ account: makeAccount(["otro@example.org"]), cfg: {} as CoreConfig });
     const status = await action.handler({ mode: "status" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
 
     expect(resultText(status)).toContain("inactivo");
+  });
+
+  // Tarea 3.3 / design.md D3: una sesión con elevatedLevel no-default
+  // (p.ej. "ask") seteado por alguna otra vía antes de activar el bypass
+  // debe recuperar ese valor exacto al terminar, no "off" ni undefined --
+  // approval-bypass.ts no tenía este caso porque restauraba dos campos
+  // independientes que rara vez tenían un valor previo real fuera de un
+  // bypass ya en curso.
+  it("preserva un elevatedLevel previo no-default al revertir", async () => {
+    const SESSION_KEY = freshSessionKey();
+    sessionStore.set(SESSION_KEY, { elevatedLevel: "ask" });
+
+    const action = buildElevatedSessionAction({ account: makeAccount([AUTHORIZED_JID]), cfg: {} as CoreConfig });
+    await action.handler({ mode: "on", minutes: "1" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
+    expect(sessionStore.get(SESSION_KEY)).toMatchObject({ elevatedLevel: "full" });
+
+    const off = await action.handler({ mode: "off" }, { fromJid: AUTHORIZED_JID, accountId: "default" });
+    expect(String(off)).toContain("desactivado");
+    expect(sessionStore.get(SESSION_KEY)?.elevatedLevel).toBe("ask");
   });
 });

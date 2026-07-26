@@ -55,17 +55,18 @@ export default defineBundledChannelEntry({
       await cancelForSession(event.sessionKey, `session_end:${event.reason ?? "unknown"}`);
     });
 
-    // Barrido de bypasses de aprobación expirados (xmpp-approval-unified-
+    // Barrido de bypasses elevados expirados (xmpp-elevated-session-command,
+    // reemplaza el barrido de approval-bypass de xmpp-approval-unified-
     // contract): si el gateway reinició con un bypass activo, el timer en
-    // memoria de approval-bypass.ts se pierde, pero el registro persistido en
-    // pluginExtensions sobrevive. Sin este barrido, la sesión queda relajada
-    // (execSecurity:"full") indefinidamente -- fail-open. Corre una sola vez
-    // al cargar el plugin, no en un intervalo; fire-and-forget para no
-    // bloquear el resto del registro de hooks si algo falla.
-    void import("./src/approval-bypass.js")
-      .then(({ sweepExpiredApprovalBypasses }) => sweepExpiredApprovalBypasses())
+    // memoria de elevated-session.ts se pierde, pero el registro persistido
+    // en pluginExtensions sobrevive. Sin este barrido, la sesión queda
+    // elevada (elevatedLevel:"full") indefinidamente -- fail-open. Corre una
+    // sola vez al cargar el plugin, no en un intervalo; fire-and-forget para
+    // no bloquear el resto del registro de hooks si algo falla.
+    void import("./src/elevated-session.js")
+      .then(({ sweepExpiredElevatedBypasses }) => sweepExpiredElevatedBypasses())
       .catch((err) => {
-        api.logger?.warn?.(`xmpp: fallo barriendo bypasses expirados: ${String(err)}`);
+        api.logger?.warn?.(`xmpp: fallo barriendo bypasses elevados expirados: ${String(err)}`);
       });
   },
   plugin: {

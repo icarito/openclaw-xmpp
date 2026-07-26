@@ -37,8 +37,8 @@ describe("Xep0050Handler: result form", () => {
 
   it("un handler que retorna {text, fields} adjunta <x type=result> junto al <note>", async () => {
     const dispatcher = createActionDispatcher([
-      noParamsAction("approval-bypass", () => ({
-        text: "Bypass: activo, quedan 8m.",
+      noParamsAction("elevated", () => ({
+        text: "Elevated: activo, quedan 8m.",
         fields: [
           { var: "active", value: "true" },
           { var: "remaining-seconds", value: "480" },
@@ -47,11 +47,11 @@ describe("Xep0050Handler: result form", () => {
     ]);
     const handler = new Xep0050Handler({ dispatcher, accountId: "default" });
 
-    const result = await handler.handleIq(buildExecuteIq("approval-bypass"));
+    const result = await handler.handleIq(buildExecuteIq("elevated"));
 
     const command = result?.getChild("command", COMMAND_NS);
     // El <note> humano-legible se preserva sin cambios.
-    expect(command?.getChild("note")?.getText()).toBe("Bypass: activo, quedan 8m.");
+    expect(command?.getChild("note")?.getText()).toBe("Elevated: activo, quedan 8m.");
 
     // El <x type="result"> es aditivo, con un <field var><value> por entrada.
     const resultForm = command?.getChild("x", "jabber:x:data");
