@@ -390,6 +390,10 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     if (!from) return;
 
     const oobUrl = extractOobUrl(realStanza, body);
+    // A decrypted-OMEMO body may carry the OOB <x> fragment as literal text
+    // (see extractOobUrl); strip it so neither the agent nor the user sees
+    // raw XML once the URL has already been recovered above.
+    if (oobUrl) body = stripInlineOobMarkup(body);
     if (type === "groupchat") {
       logger.info(
         `[${account.accountId}] inbound MUC stanza from ${from} body=${body ? "present" : "empty"} oob=${oobUrl ? "present" : "absent"}`,
