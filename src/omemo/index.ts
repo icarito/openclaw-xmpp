@@ -906,14 +906,35 @@ export async function encryptMucOmemoMessage(
 
   const configuredMucProtocol = getOmemoProtocol(accountId);
   // "dual" accounts run the genuine OMEMO 2 sidecar alongside the legacy
-  // store (see initializeOmemo, protocol === "v2" || protocol === "dual").
-  // Mirror the negotiation encryptOmemoMessage() already does for DMs: if
-  // the sidecar is available, prefer it for MUC too, otherwise every
-  // legacy-path bundle lookup targets the wrong PEP node layout
-  // (bundle.ts uses `${node}:${deviceId}` per-device nodes, while the v2
-  // sidecar publishes a single fixed node keyed by itemId) and every
-  // "own devices" self-encrypt fails with "bundle not found".
-  if ((configuredMucProtocol === "v2" || configuredMucProtocol === "dual") && hasOmemo2(accountId)) {
+  // store (see initializeOmemo, protocol === "v2" || protocol === "dual"),
+  // so the sidecar is a valid MUC encryption path for them too. Without
+  // this, dual accounts always fell through to the legacy branch below,
+  // whose bundle lookups target the draft per-device PEP node layout
+  // (bundle.ts uses `${node}:${deviceId}`) that the v2 sidecar never
+  // publishes to — every self-encrypt then failed with "bundle not found".
+  //
+  // A room is only encrypted with v2 when *every* occupant can read it.
+  // A single stanza carries one protocol, and OMEMO 2 is still rare in the
+  // wild (Dino, Conversations and Cheogram all speak legacy), so one
+  // legacy-only occupant would be silently locked out of the whole room.
+  // Legacy is the safe common denominator: v2-capable clients publish
+  // legacy device lists as well, so preferring it excludes nobody.
+  let useOmemo2ForMuc = configuredMucProtocol === "v2";
+  if (configuredMucProtocol === "dual") {
+    const legacyCapableJids: string[] = [];
+    for (const jid of occupantJids) {
+      const legacyDevices = await fetchDeviceList(accountId, bareJid(jid), log, "legacy");
+      if (legacyDevices.length > 0) legacyCapableJids.push(bareJid(jid));
+    }
+    useOmemo2ForMuc = legacyCapableJids.length === 0;
+    if (!useOmemo2ForMuc) {
+      log?.debug?.(
+        `[${accountId}] MUC ${roomJid}: using legacy OMEMO, ${legacyCapableJids.length} occupant(s) publish legacy devices (${legacyCapableJids.join(", ")})`,
+      );
+    }
+  }
+
+  if (useOmemo2ForMuc && hasOmemo2(accountId)) {
     try {
       return await encryptOmemo2(
         accountId,
@@ -931,9 +952,17 @@ export async function encryptMucOmemoMessage(
     // Collect all devices from all occupants
     const allDevices: Array<{ jid: string; deviceId: number }> = [];
 
-    const refreshDevices = getOmemoProtocol(accountId) === "v2";
+    // Reaching here in "dual" mode means the room was resolved to legacy
+    // above, so pin every lookup to that protocol: an unqualified
+    // getDeviceList() can return v2 devices, which would then be encrypted
+    // against with the legacy key format below (isV2 is false for "dual").
+    const legacyBranchProtocol: OmemoProtocol =
+      configuredMucProtocol === "dual" ? "legacy" : configuredMucProtocol;
+    const refreshDevices = legacyBranchProtocol === "v2";
     for (const jid of occupantJids) {
-      const devices = await getDeviceList(accountId, jid, refreshDevices, log);
+      const devices = configuredMucProtocol === "dual"
+        ? await fetchDeviceList(accountId, bareJid(jid), log, "legacy")
+        : await getDeviceList(accountId, jid, refreshDevices, log);
       for (const device of devices) {
         allDevices.push({ jid, deviceId: device.id });
       }
@@ -947,14 +976,16 @@ export async function encryptMucOmemoMessage(
     // Also include our own devices for multi-device sync
     // Unlike DMs, MUC messages are reflected back by the server, so we MUST
     // encrypt for our own device(s) to read the reflected message
-    const ownDevices = await getDeviceList(accountId, "", refreshDevices, log);
+    const ownDevices = configuredMucProtocol === "dual"
+      ? await fetchDeviceList(accountId, "", log, "legacy")
+      : await getDeviceList(accountId, "", refreshDevices, log);
     const ourDeviceId = store.getDeviceId();
     // For MUC, include ALL own devices including current one (for reflected messages)
     const ownDevicesToEncrypt = ownDevices;
 
     log?.debug?.(`[${accountId}] MUC OMEMO: ${allDevices.length} occupant devices, ${ownDevicesToEncrypt.length} own devices (incl. self)`);
 
-    const isV2 = getOmemoProtocol(accountId) === "v2";
+    const isV2 = legacyBranchProtocol === "v2";
     const payloadPlaintext = isV2 ? buildSceEnvelope(plaintext, roomJid) : plaintext;
     const v2Payload = isV2 ? encryptV2Payload(new TextEncoder().encode(payloadPlaintext)) : null;
     const aesKey = isV2 ? new Uint8Array() : crypto.getRandomValues(new Uint8Array(16));
@@ -980,7 +1011,8 @@ export async function encryptMucOmemoMessage(
           jid,
           deviceId,
           messageKey,
-          log
+          log,
+          legacyBranchProtocol
         );
         if (result) {
           keyElements.push(
@@ -1009,7 +1041,8 @@ export async function encryptMucOmemoMessage(
           "", // Self
           device.id,
           messageKey,
-          log
+          log,
+          legacyBranchProtocol
         );
         if (result) {
           keyElements.push(
