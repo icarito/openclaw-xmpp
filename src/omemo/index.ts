@@ -904,7 +904,16 @@ export async function encryptMucOmemoMessage(
 
   log?.debug?.(`[${accountId}] MUC OMEMO: encrypting for ${occupantJids.length} occupants in ${roomJid}`);
 
-  if (getOmemoProtocol(accountId) === "v2" && hasOmemo2(accountId)) {
+  const configuredMucProtocol = getOmemoProtocol(accountId);
+  // "dual" accounts run the genuine OMEMO 2 sidecar alongside the legacy
+  // store (see initializeOmemo, protocol === "v2" || protocol === "dual").
+  // Mirror the negotiation encryptOmemoMessage() already does for DMs: if
+  // the sidecar is available, prefer it for MUC too, otherwise every
+  // legacy-path bundle lookup targets the wrong PEP node layout
+  // (bundle.ts uses `${node}:${deviceId}` per-device nodes, while the v2
+  // sidecar publishes a single fixed node keyed by itemId) and every
+  // "own devices" self-encrypt fails with "bundle not found".
+  if ((configuredMucProtocol === "v2" || configuredMucProtocol === "dual") && hasOmemo2(accountId)) {
     try {
       return await encryptOmemo2(
         accountId,
@@ -913,7 +922,8 @@ export async function encryptMucOmemoMessage(
       );
     } catch (err) {
       log?.error?.(`[${accountId}] genuine OMEMO 2 MUC encryption failed: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
+      if (configuredMucProtocol === "v2") return null;
+      log?.warn?.(`[${accountId}] falling back to legacy MUC OMEMO encryption for ${roomJid}`);
     }
   }
 
