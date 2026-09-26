@@ -2,7 +2,14 @@
 // verbatim (behaviorally) from the NanoClaw adapter (src/channels/xmpp.ts).
 // Kept dependency-free (no @xmpp/client import) so they stay easily testable.
 import { randomUUID } from "node:crypto";
+import { createElement as xml } from "@xmpp/xml";
 import type { Element } from "@xmpp/xml";
+
+export const NS_ORIGIN_ID = "urn:xmpp:sid:0";
+export const NS_STANZA_ID = "urn:xmpp:sid:0";
+export const NS_RECEIPTS = "urn:xmpp:receipts";
+export const NS_CHAT_MARKERS = "urn:xmpp:chat-markers:0";
+export const NS_HINTS = "urn:xmpp:hints";
 
 /**
  * XMPP has no per-server body-length spec, but many servers (and mobile
@@ -174,3 +181,113 @@ export function detectContextCommand(body: string): string | null {
   if (/^\/compact\b/i.test(trimmed)) return "context compacted";
   return null;
 }
+
+// ── XEP-0359 origin-id, XEP-0184 receipts, XEP-0333 markers, XEP-0334 hints ──
+
+/** Build the XEP-0359 `<origin-id/>` element for a stanza id. */
+export function buildOriginIdElement(id: string): Element {
+  return xml("origin-id", { xmlns: NS_ORIGIN_ID, id });
+}
+
+export function getOriginId(stanza: Element): string | undefined {
+  const origin = stanza.getChild("origin-id", NS_ORIGIN_ID);
+  const id = origin?.attrs.id;
+  return typeof id === "string" && id.trim() ? id : undefined;
+}
+
+/** Composite XEP-0359 stanza-id key `(by, id)` used for archive dedupe. */
+export function getStanzaIdKey(stanza: Element): { by: string; id: string } | null {
+  const stanzaId = stanza.getChild("stanza-id", NS_STANZA_ID);
+  const id = stanzaId?.attrs.id;
+  const by = stanzaId?.attrs.by;
+  if (typeof id !== "string" || !id.trim()) return null;
+  return { by: typeof by === "string" ? by : "", id };
+}
+
+/** XEP-0184 `<request/>` asking the recipient for a delivery receipt. */
+export function buildReceiptRequest(): Element {
+  return xml("request", { xmlns: NS_RECEIPTS });
+}
+
+/** XEP-0184 `<received/>` acknowledging an inbound message by its id. */
+export function buildReceiptReceived(to: string, id: string, type: string): Element {
+  return xml(
+    "message",
+    { type, to, id: `oc-rcpt-${id}`.slice(0, 120) },
+    xml("received", { xmlns: NS_RECEIPTS, id }),
+  );
+}
+
+export function hasReceiptRequest(stanza: Element): boolean {
+  return Boolean(stanza.getChild("request", NS_RECEIPTS));
+}
+
+/** Returns the acked message id carried by a XEP-0184 `<received/>`. */
+export function extractReceiptId(stanza: Element): string | undefined {
+  const received = stanza.getChild("received", NS_RECEIPTS);
+  const id = received?.attrs.id;
+  return typeof id === "string" && id.trim() ? id : undefined;
+}
+
+export type XmppChatMarker = "received" | "displayed";
+
+export function buildChatMarker(
+  to: string,
+  id: string,
+  marker: XmppChatMarker,
+  type: string,
+): Element {
+  return xml(
+    "message",
+    { type, to, id: `oc-marker-${marker}-${id}`.slice(0, 120) },
+    xml(marker, { xmlns: NS_CHAT_MARKERS, id }),
+  );
+}
+
+export function extractChatMarker(stanza: Element): { marker: XmppChatMarker; id: string } | null {
+  for (const marker of ["received", "displayed"] as const) {
+    const child = stanza.getChild(marker, NS_CHAT_MARKERS);
+    const id = child?.attrs.id;
+    if (typeof id === "string" && id.trim()) return { marker, id };
+  }
+  return null;
+}
+
+/** XEP-0334 hint that a stanza is transient (must not fill MAM/push). */
+export function hasNoStoreHint(stanza: Element): boolean {
+  return Boolean(stanza.getChild("no-store", NS_HINTS));
+}
+
+/** XEP-0334 hint that a stanza must not be carbon-copied to other resources. */
+export function hasNoCopyHint(stanza: Element): boolean {
+  return Boolean(stanza.getChild("no-copy", NS_HINTS));
+}
+
+// ── XEP-0280 carbons unwrapping ──
+
+export type CarbonClassification = {
+  /** `sent` carbons must be ignored; `received` ones are unwrapped. */
+  kind: "sent" | "received" | "none";
+  stanza: Element;
+  isCarbonCopy: boolean;
+};
+
+/**
+ * Classify a XEP-0280 carbon wrapper. A `<sent/>` carbon is a copy of a
+ * message this same account already sent from another resource, so it must be
+ * ignored (never a turn); a `<received/>` carbon carries the real inbound
+ * message and is unwrapped.
+ */
+export function classifyCarbonStanza(stanza: Element): CarbonClassification {
+  if (stanza.getChild("sent", "urn:xmpp:carbons:2")) {
+    return { kind: "sent", stanza, isCarbonCopy: false };
+  }
+  const received = stanza.getChild("received", "urn:xmpp:carbons:2");
+  if (received) {
+    const inner = received.getChild("forwarded", "urn:xmpp:forward:0")?.getChild("message");
+    if (inner) return { kind: "received", stanza: inner, isCarbonCopy: true };
+  }
+  return { kind: "none", stanza, isCarbonCopy: false };
+}
+
+

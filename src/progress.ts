@@ -15,6 +15,8 @@ import {
   resolveChannelPreviewStreamMode,
 } from "openclaw/plugin-sdk/channel-outbound";
 import type { ResolvedXmppAccount } from "./accounts.js";
+import { resolveHooksConfig } from "./config-defaults.js";
+import { publishProgressHookEvent } from "./hooks/pep-events.js";
 import { isGroupJid } from "./normalize.js";
 import { markdownToPlain, XMPP_MAX_BODY } from "./protocol.js";
 import { sendEditXmpp, sendMessageXmpp, sendPayloadXmpp } from "./send.js";
@@ -74,6 +76,24 @@ export function createXmppProgressController(params: {
   const active = mode !== "off";
   const partialEnabled = mode === "partial";
   const sendOpts = { cfg: params.cfg, accountId: params.account.accountId };
+  const hooks = resolveHooksConfig(entry);
+
+  // PEP progress hooks (tarea 7.2): el ciclo del turno se publica incluso si
+  // streaming está apagado, porque es la señal que consumen los clientes
+  // ad-hoc. Un fallo de publicación jamás afecta el turno (la promesa se
+  // traga en pep-events).
+  let progressHookEnded = false;
+  const emitProgressHook = (state: "start" | "end", detail?: string): void => {
+    if (!hooks.pepEvents) return;
+    void publishProgressHookEvent({
+      accountId: params.account.accountId,
+      state,
+      sessionKey: params.sessionKey ?? null,
+      target: params.target,
+      detail: detail ?? null,
+      log: { debug: params.log },
+    });
+  };
 
   // UNA burbuja por turno: se crea con la primera herramienta y de ahí en
   // adelante SIEMPRE se edita la misma, aunque el modelo intercale narración
@@ -128,8 +148,10 @@ export function createXmppProgressController(params: {
       } else {
         // Nota: sendMessageXmpp emite <active/> y presencia "available" al
         // final; el heartbeat del turno re-publica composing/dnd enseguida,
-        // así que el parpadeo de presencia es breve y tolerable.
-        const result = await sendMessageXmpp(params.target, text, sendOpts);
+        // así que el parpadeo de presencia es breve y tolerable. La burbuja
+        // inicial es un placeholder efímero (se convertirá en la respuesta
+        // vía XEP-0308): no se spool-ea ni solicita receipt.
+        const result = await sendMessageXmpp(params.target, text, { ...sendOpts, ephemeral: true });
         progressMessageId = result.messageId;
         if (sessionKey) {
           liveBubbleRegistry().set(sessionKey, { progressMessageId, target: params.target });
@@ -186,10 +208,18 @@ export function createXmppProgressController(params: {
   /** Immediate acknowledgement. It becomes the progress/final bubble through
    * XEP-0308, so feedback does not add a second permanent message. */
   const start = async () => {
+    emitProgressHook("start");
     if (!active || progressMessageId) return;
     partialText = ACK_PLACEHOLDER_TEXT;
     queueRender();
     await closeWindow();
+  };
+
+  /** Cierra el ciclo PEP del turno exactamente una vez (tarea 7.2). */
+  const endTurn = (detail?: string): void => {
+    if (progressHookEnded) return;
+    progressHookEnded = true;
+    emitProgressHook("end", detail);
   };
 
   /** true si la burbuja ya muestra algo más que el ack inicial: texto de
@@ -267,7 +297,7 @@ export function createXmppProgressController(params: {
    * líneas de tools (para no dejar el parcial duplicado bajo la respuesta
    * real) y devuelve false para que el caller entregue normal (normalFallback).
    */
-  const finalizeWithFinalText = async (finalText: string): Promise<boolean> => {
+  const finalizeWithFinalText = async (finalText: string, replyTo?: string): Promise<boolean> => {
     if (!active) {
       return false;
     }
@@ -297,7 +327,12 @@ export function createXmppProgressController(params: {
     const bubbleId = progressMessageId;
     if (plain.trim() && plain.length <= XMPP_MAX_BODY) {
       try {
-        await sendEditXmpp(params.target, finalText, bubbleId, sendOpts);
+        await sendEditXmpp(
+          params.target,
+          finalText,
+          bubbleId,
+          replyTo ? { ...sendOpts, replyTo } : sendOpts,
+        );
         consumeBubble();
         return true;
       } catch (error) {
@@ -481,6 +516,7 @@ export function createXmppProgressController(params: {
   return {
     active,
     closeWindow,
+    endTurn,
     finalizeWithFinalText,
     finishWithError,
     handleApprovalEvent,

@@ -92,14 +92,14 @@ in `src/commands.ts`:
   session-scoped `execSecurity`/`execAsk` override via
   `getSessionEntry`/`patchSessionEntry` (in-process plugin-sdk calls), with
   an in-memory TTL timer for auto-reversion — no NanoClaw module, no restart.
-- **Telemetry read side** (`src/telemetry.ts`): the PEP **publish** mechanics
-  (pubsub IQ building, presence caps, the "did the number move enough to
-  bother publishing" thresholding) are fully ported and live. The **read**
-  side (`readTelemetryStub()`) always returns "no session" — NanoClaw read
-  token/context counts directly from a per-session `opencode.db` SQLite file
-  that OpenClaw's single-process gateway does not produce. TODO comment left
-  for whoever finds (or adds) the equivalent `api.runtime.agent.session.*`
-  read path.
+- **Telemetry read side** (`src/telemetry.ts`): **RESUELTO** (ver
+  "2026-09 update" más abajo). El read-side ya no es un stub: `readAgentTelemetry()`
+  lee la sesión real del agente vía `openclaw/plugin-sdk/agent-sessions`
+  (`getLastAssistantUsage`/`calculateContextTokens`/`loadEntriesFromFile`),
+  resuelve el `agentDir` por `bindings` y calcula contexto, tokens y coste
+  de sesión/día. El node XEP-0050 `credit` y `/credit` consumen ese read-side
+  real. La descripción original ("`readTelemetryStub()` siempre devuelve no
+  session") ya no aplica.
 
 ## Deviations from IRC's pattern, and why
 
@@ -390,3 +390,55 @@ git repository entirely.
   worktree to typecheck against); verified only by reading the exact
   `ChannelHeartbeatAdapter` type from the installed SDK's
   `types.adapters-sK5EFxPJ.d.ts` and matching Matrix's real call-site shape.
+
+## 2026-09 update: xmpp-first-class-channel (fases A/B/C)
+
+Este change cerró las brechas de paridad con Telegram listadas arriba. Lo que
+antes figuraba como stub, gap documentado o "no portado" pasa a estar
+implementado y verificado localmente (`npx tsc --noEmit` sin errores y
+`npx vitest run` verde). El deploy y el bump del gitlink siguen siendo una
+fase posterior de sesión primaria (ver CLAUDE.md: este checkout no es el
+servicio productivo).
+
+**Gaps cerrados:**
+
+- **XEP-0198 completo** (`src/outbound-spool.ts`, `src/client.ts`, `src/monitor.ts`):
+  suscripción a `resumed`/`failed`/acks, spool persistente de salientes no
+  reconocidos keyeado por `origin-id` XEP-0359, reenvío con backoff y tope,
+  clasificación de fallos de entrega (`src/delivery-failure.ts`).
+- **Anti-fuga** (`src/inbound-debounce.ts`, `src/burst-breaker.ts`,
+  `src/dispatch-dedupe.ts`): debounce de entrada, freno de cadenas de salida
+  y dedupe durable de despacho con TTL.
+- **XEP-0313 MAM** (`src/mam.ts`, `src/mam-watermark.ts`,
+  `src/history-context.ts`, `src/preflight-features.ts`): query IQ-set, RSM,
+  archive-id XEP-0359, watermark por cuenta/peer, catch-up observacional,
+  degradación a fetch-latest, control de historial en el join MUC.
+- **XEP-0184 receipts y XEP-0333 markers**: `<request/>` en finales durables,
+  `<received/>` y `<displayed/>` salientes; nunca en parciales efímeros.
+- **XEP-0461 replies salientes** (`src/reply-context.ts`, `src/send.ts`):
+  `<reply id to/>` + `<fallback for="urn:xmpp:reply:0">` con el id y el
+  remitente originales. Antes solo existía el parseo inbound (`extractReply`).
+  Con OMEMO se omite la reply hermana (el plugin solo cifra el `<body>`).
+- **XEP-0444 reactions** (`src/reactions.ts`): emisión opt-in (`hooks.reactions`),
+  DM siempre y MUC solo non-anonymous; reacciones entrantes ignoradas sin turno.
+  El tracker MUC ahora reconoce además el código 170 (semi-anonymous).
+- **Hooks PEP** (`src/hooks/pep-events.ts`): nodos versionados
+  `urn:openclaw:hooks:{activity,approval,progress}:0` con payload JSON
+  estructurado, cableados a las transiciones de actividad, al ciclo de
+  aprobaciones y al inicio/fin de turno.
+- **Read-side de telemetría real** (`src/telemetry.ts`): el stub descrito arriba
+  quedó reemplazado por la lectura de la sesión real; el node `credit` y
+  `/credit` reportan consumo/contexto reales y el node `status` consulta el
+  estado de conexión y la actividad vivos.
+- **Aprobaciones** (`src/approval-card-registry.ts`): registro persistente de
+  cards activas y reconciliación al arranque con XEP-0308.
+
+**Documentación:** `HOOKS.md` congela el contrato para clientes ad-hoc
+(XEP-0050/XEP-0004, `expires-at-ms`, caps, MAM, PEP, receipts/markers,
+replies y reactions). `OPERATIONS.md` documenta los requisitos de servidor
+(`mod_mam`, retención, `prosodyctl`) y los flags nuevos con su degradación.
+
+**Verificación pendiente (sesión primaria):** los casos que requieren un
+servidor real (kill con salientes pendientes, reconexión larga offline, replay
+MUC, card huérfana) quedan como plan E2E de la tarea 8.5, fuera de este
+alcance local.

@@ -40,6 +40,50 @@ function expiryHandler(): ExpiryHandler | null {
   return g[HANDLER_KEY] ?? null;
 }
 
+/**
+ * Observer invoked on every activity transition, so the PEP hooks layer
+ * (tarea 7.2) can publish `urn:openclaw:hooks:activity:0` without every
+ * setter having to know about it. Per-account so multiple fleet accounts do
+ * not overwrite each other's listener.
+ */
+type ActivityChangeHandler = (
+  accountId: string,
+  activity: XmppActivity["activity"],
+  target: string | null | undefined,
+  pendingCount?: number,
+) => void;
+
+const CHANGE_HANDLER_KEY = "__openclawXmppActivityChangeHandlers";
+
+function changeHandlers(): Map<string, ActivityChangeHandler> {
+  const g = globalThis as typeof globalThis & { [CHANGE_HANDLER_KEY]?: Map<string, ActivityChangeHandler> };
+  if (!g[CHANGE_HANDLER_KEY]) g[CHANGE_HANDLER_KEY] = new Map();
+  return g[CHANGE_HANDLER_KEY]!;
+}
+
+export function registerActivityChangeHandler(
+  accountId: string,
+  handler: ActivityChangeHandler | null,
+): void {
+  if (!handler) changeHandlers().delete(accountId);
+  else changeHandlers().set(accountId, handler);
+}
+
+function notifyActivityChange(
+  accountId: string,
+  activity: XmppActivity["activity"],
+  target: string | null | undefined,
+  pendingCount?: number,
+): void {
+  const handler = changeHandlers().get(accountId);
+  if (!handler) return;
+  try {
+    handler(accountId, activity, target, pendingCount);
+  } catch {
+    // Un observador roto jamás debe romper el flujo de actividad.
+  }
+}
+
 function registry(): Registry {
   const g = globalThis as typeof globalThis & { [REGISTRY_KEY]?: Registry };
   if (!g[REGISTRY_KEY]) g[REGISTRY_KEY] = new Map();
@@ -66,6 +110,7 @@ export function setXmppAccountActivity(
 ): void {
   registry().set(accountId, { activity, target, since: Date.now() });
   clearTimer(accountId);
+  notifyActivityChange(accountId, activity, target);
 
   // Sólo busy/pending caducan: available/paused son estados estables. El timer
   // es la red de seguridad para un turno que muere sin limpiar tras de sí.
@@ -77,6 +122,7 @@ export function setXmppAccountActivity(
     if (current?.activity !== activity) return;
     registry().delete(accountId);
     expiryHandler()?.(accountId, current.target);
+    notifyActivityChange(accountId, "available", current.target);
   }, ttl);
   timer.unref?.();
   timers().set(accountId, timer);
@@ -86,6 +132,7 @@ export function clearXmppAccountActivity(accountId: string): XmppActivity | null
   const current = registry().get(accountId) ?? null;
   registry().delete(accountId);
   clearTimer(accountId);
+  if (current) notifyActivityChange(accountId, "available", current.target);
   if (current?.activity === "busy" || current?.activity === "processing" || current?.activity === "pending") {
     expiryHandler()?.(accountId, current.target);
   }
@@ -107,12 +154,14 @@ export function markXmppMessagePending(accountId: string, target?: string | null
   const pendingCount = (current?.activity === "pending" ? current.pendingCount ?? 0 : 0) + 1;
   registry().set(accountId, { activity: "pending", target, since: Date.now(), pendingCount });
   clearTimer(accountId);
+  notifyActivityChange(accountId, "pending", target, pendingCount);
   const timer = setTimeout(() => {
     timers().delete(accountId);
     const latest = registry().get(accountId);
     if (latest?.activity !== "pending") return;
     registry().delete(accountId);
     expiryHandler()?.(accountId, latest.target);
+    notifyActivityChange(accountId, "available", latest.target);
   }, PENDING_TTL_MS);
   timer.unref?.();
   timers().set(accountId, timer);

@@ -542,7 +542,10 @@ export async function handleXmppInbound(params: {
           // convierte la burbuja de progreso en la respuesta final (una última
           // corrección XEP-0308) en vez de llegar como mensaje aparte.
           if (p.text && !p.presentation && !p.mediaUrl && !p.channelData) {
-            const handled = await progress.finalizeWithFinalText(p.text);
+            const replyToId = typeof (payload as { replyToId?: unknown }).replyToId === "string"
+              ? (payload as { replyToId: string }).replyToId
+              : undefined;
+            const handled = await progress.finalizeWithFinalText(p.text, replyToId);
             if (handled) {
               statusSink?.({ lastOutboundAt: Date.now() });
               return;
@@ -607,6 +610,9 @@ export async function handleXmppInbound(params: {
   } else if (!deliveredVisibleReply) {
     await progress.finishWithoutReply();
   }
+  // PEP progress end (tarea 7.2): un único cierre por turno, sin importar por
+  // qué rama salió (respuesta entregada, error o turno sin respuesta).
+  progress.endTurn(turnError ? "error" : "completed");
   // A final reply may be delivered by editing the progress bubble. Unlike a
   // normal send, that XEP-0308 path does not clear composing/presence itself.
   await clearTypingXmpp(peerId, {

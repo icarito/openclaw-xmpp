@@ -32,9 +32,55 @@ import { resolveXmppAccount } from "./accounts.js";
 import { normalizeXmppAllowEntry } from "./normalize.js";
 import { resolveInlineButtonsScope } from "./outbound-render.js";
 import { buildApprovalCardTitle, buildCompactExecApprovalText } from "./approval-text.js";
+import { getApprovalCardRegistry } from "./approval-card-registry.js";
+import { DEFAULT_TTL_MS } from "./command-node-registry.js";
+import { publishApprovalHookEvent } from "./hooks/pep-events.js";
+import { resolveHooksConfig } from "./config-defaults.js";
+import { reactionForApprovalText, sendReactionXmpp } from "./reactions.js";
 import type { CoreConfig } from "./types.js";
 
 const log = createSubsystemLogger("xmpp/approvals");
+
+/**
+ * Publish an approval lifecycle event on the PEP hooks node (tarea 7.2).
+ * Best-effort and config-gated: a PEP failure must never affect the approval
+ * flow, and the node is only used when `hooks.pepEvents` is enabled.
+ */
+function emitApprovalHook(params: {
+  cfg: CoreConfig;
+  accountId?: string;
+  state: "pending" | "resolved" | "expired" | "canceled";
+  approvalId: string;
+  stanzaId?: string;
+  jid?: string;
+  sessionKey?: string;
+  expiresAtMs?: number | null;
+  decision?: string | null;
+  command?: string | null;
+}): void {
+  try {
+    const account = resolveXmppAccount({ cfg: params.cfg, accountId: params.accountId });
+    if (!resolveHooksConfig(account.config).pepEvents) return;
+    void publishApprovalHookEvent({
+      accountId: account.accountId,
+      state: params.state,
+      approvalId: params.approvalId,
+      stanzaId: params.stanzaId ?? null,
+      jid: params.jid ?? null,
+      sessionKey: params.sessionKey ?? null,
+      expiresAtMs: params.expiresAtMs ?? null,
+      decision: params.decision ?? null,
+      command: params.command ?? null,
+      log,
+    });
+  } catch {
+    // Never break approvals over an event side channel.
+  }
+}
+
+function approvalCardRegistry(accountId: string | undefined) {
+  return getApprovalCardRegistry(accountId || "default");
+}
 
 const repromptTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -156,6 +202,7 @@ export async function cancelApprovalsForSession(params: {
 
   untrackApproval(params.sessionKey);
   cancelRepromptByApprovalId(inFlight.stanzaId);
+  approvalCardRegistry(inFlight.accountId).removeByStanza(inFlight.stanzaId);
 
   try {
     const { sendEditXmpp } = await loadXmppSendRuntime();
@@ -169,6 +216,16 @@ export async function cancelApprovalsForSession(params: {
     log.info(
       `xmpp approvals: cancelada ${inFlight.approvalId} por fin de sesión (${params.reason})`,
     );
+    emitApprovalHook({
+      cfg: params.cfg,
+      accountId: inFlight.accountId,
+      state: "canceled",
+      approvalId: inFlight.approvalId,
+      stanzaId: inFlight.stanzaId,
+      jid: inFlight.jid,
+      sessionKey: params.sessionKey,
+      decision: "deny",
+    });
   } catch (error) {
     // El gateway ya la denegó, así que el estado es consistente aunque la
     // edición no llegue; los clientes la retirarán por expiry.
@@ -549,6 +606,34 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
         });
       }
 
+      // Registro persistente de la card activa (tareas 6.1/6.2): si el proceso
+      // muere con la aprobación pendiente, la próxima instancia la cierra con
+      // XEP-0308 en vez de dejar una card zombi.
+      approvalCardRegistry(deliveryAccountId).register({
+        approvalId: request.id,
+        stanzaId: result.messageId,
+        accountId: deliveryAccountId || "default",
+        jid: result.target,
+        node: `cmd:${result.messageId}`,
+        expiresAt: request.expiresAtMs ?? Date.now() + DEFAULT_TTL_MS,
+        createdAt: Date.now(),
+        ...(guardSessionKey ? { sessionKey: guardSessionKey } : {}),
+        ...(view.approvalKind === "exec" && view.commandText ? { commandText: view.commandText } : {}),
+      });
+
+      // PEP: la card ya está entregada y registrada -> estado "pending".
+      emitApprovalHook({
+        cfg: cfg as CoreConfig,
+        accountId: deliveryAccountId,
+        state: "pending",
+        approvalId: request.id,
+        stanzaId: result.messageId,
+        jid: result.target,
+        ...(guardSessionKey ? { sessionKey: guardSessionKey } : {}),
+        expiresAtMs: request.expiresAtMs ?? null,
+        command: view.approvalKind === "exec" ? view.commandText ?? null : null,
+      });
+
       return {
         jid: result.target,
         stanzaId: result.messageId,
@@ -560,11 +645,52 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
       log.info(`xmpp approvals: updating card stanza=${entry.stanzaId}`);
       cancelRepromptByApprovalId(entry.stanzaId);
       if (entry.sessionKey) untrackApproval(entry.sessionKey);
+      const cardRegistry = approvalCardRegistry(entry.accountId || accountId);
+      const card = cardRegistry.get(entry.stanzaId);
+      cardRegistry.removeByStanza(entry.stanzaId);
       const { sendEditXmpp } = await loadXmppSendRuntime();
       await sendEditXmpp(entry.jid, payload.text, entry.stanzaId, {
         cfg: cfg as CoreConfig,
         accountId: entry.accountId || accountId,
       });
+
+      // PEP: la card se resolvió o expiró (el edit terminal lo distingue).
+      const state = /^⌛/.test(payload.text.trim()) ? "expired" : "resolved";
+      const decision = state !== "resolved"
+        ? null
+        : /🚫|denegado/i.test(payload.text)
+          ? "deny"
+          : /siempre/i.test(payload.text)
+            ? "allow-always"
+            : "allow";
+      emitApprovalHook({
+        cfg: cfg as CoreConfig,
+        accountId: entry.accountId || accountId,
+        state,
+        approvalId: card?.approvalId ?? "",
+        stanzaId: entry.stanzaId,
+        jid: entry.jid,
+        ...(entry.sessionKey ?? card?.sessionKey ? { sessionKey: entry.sessionKey ?? card?.sessionKey } : {}),
+        expiresAtMs: card?.expiresAt ?? null,
+        command: card?.commandText ?? null,
+        decision,
+      });
+
+      // XEP-0444: reaccionar a la card resuelta (✅/🚫) cuando hooks.reactions
+      // está activo y el destino es un DM o un room non-anonymous.
+      if (state === "resolved") {
+        const emoji = reactionForApprovalText(payload.text);
+        if (emoji) {
+          void sendReactionXmpp({
+            cfg: cfg as CoreConfig,
+            accountId: entry.accountId || accountId,
+            to: entry.jid,
+            messageId: entry.stanzaId,
+            reactions: [emoji],
+            log: (line) => log.info(line),
+          });
+        }
+      }
     },
   },
   observe: {
@@ -576,6 +702,8 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
       if (isGuardRejection(error)) return;
       const sessionKey = normalizeOptionalString(request.request.sessionKey);
       if (sessionKey) untrackApproval(sessionKey);
+      // La card no llegó a entregarse: no debe quedar registrada como activa.
+      approvalCardRegistry(normalizeOptionalString(request.request.turnSourceAccountId)).removeByApprovalId(request.id);
     },
   },
 });

@@ -18,6 +18,57 @@ export type XmppCapabilitiesConfig =
       inlineButtons?: XmppInlineButtonsScope;
     };
 
+export type XmppReliabilityConfig = {
+  /** Fusión de ráfagas entrantes del mismo remitente (estilo Telegram). */
+  debounce?: {
+    enabled?: boolean;
+    /** Ventana de inactividad antes de despachar la ráfaga fusionada. */
+    windowMs?: number;
+  };
+  /** Freno de cadenas de reintento de salida hacia un mismo destino. */
+  burstBreaker?: {
+    enabled?: boolean;
+    maxTurns?: number;
+    maxMessages?: number;
+    windowMs?: number;
+    pausedMs?: number;
+  };
+  /** Spool persistente de salientes no reconocidos (XEP-0198/XEP-0184). */
+  spool?: {
+    enabled?: boolean;
+    resendOnReconnect?: boolean;
+    maxAgeMs?: number;
+    maxAttempts?: number;
+  };
+  /** Dedupe durable de despacho (claims con TTL). */
+  dispatchDedupe?: {
+    enabled?: boolean;
+    ttlMs?: number;
+  };
+};
+
+export type XmppHistoryConfig = {
+  /** Catch-up de historial vía XEP-0313 (fase B; default observacional/off). */
+  catchup?: boolean;
+  /**
+   * Opt-in: convierte cada mensaje recuperado del archivo en un turno del
+   * modelo. Default false = modo observacional (solo contexto de sesión).
+   */
+  spawnTurns?: boolean;
+  windowMs?: number;
+  maxPages?: number;
+  mucMaxStanzas?: number;
+};
+
+export type XmppHooksConfig = {
+  /** Eventos PEP estructurados (fase C). */
+  pepEvents?: boolean;
+  /** Reacciones XEP-0444 (fase C). */
+  reactions?: boolean;
+  /** Receipts XEP-0184 en finales durables. */
+  receipts?: boolean;
+};
+
 export type XmppChannelConfig = {
   requireMention?: boolean;
   tools?: GroupToolPolicyConfig;
@@ -89,6 +140,12 @@ export type XmppAccountConfig = {
     enabled?: boolean;
     resumptionMaxSeconds?: number;
   };
+  /** Fiabilidad de entrega (spool, debounce, burst breaker, dedupe de despacho). */
+  reliability?: XmppReliabilityConfig;
+  /** Historial XEP-0313 (fase B). */
+  history?: XmppHistoryConfig;
+  /** Superficie de hooks estándar para clientes ad-hoc (fase C). */
+  hooks?: XmppHooksConfig;
 };
 
 type XmppConfig = XmppAccountConfig & {

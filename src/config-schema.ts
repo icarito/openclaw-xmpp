@@ -9,6 +9,19 @@ import {
   requireOpenAllowFrom,
 } from "openclaw/plugin-sdk/channel-config-schema";
 import { z } from "zod";
+import {
+  DEFAULT_BURST_MAX_MESSAGES,
+  DEFAULT_BURST_MAX_TURNS,
+  DEFAULT_BURST_PAUSED_MS,
+  DEFAULT_BURST_WINDOW_MS,
+  DEFAULT_DEBOUNCE_WINDOW_MS,
+  DEFAULT_DISPATCH_DEDUPE_TTL_MS,
+  DEFAULT_HISTORY_MAX_PAGES,
+  DEFAULT_HISTORY_MUC_MAX_STANZAS,
+  DEFAULT_HISTORY_WINDOW_MS,
+  DEFAULT_SPOOL_MAX_AGE_MS,
+  DEFAULT_SPOOL_MAX_ATTEMPTS,
+} from "./config-defaults.js";
 import { xmppChannelConfigUiHints } from "./config-ui-hints.js";
 
 const XmppInlineButtonsScopeSchema = z.enum(["off", "dm", "group", "all", "allowlist"]);
@@ -16,6 +29,66 @@ const XmppCapabilitiesSchema = z.union([
   z.array(z.string()),
   z.object({ inlineButtons: XmppInlineButtonsScopeSchema.optional() }).strict(),
 ]);
+
+const XmppReliabilitySchema = z
+  .object({
+    debounce: z
+      .object({
+        enabled: z.boolean().optional().default(true),
+        windowMs: z.number().int().positive().optional().default(DEFAULT_DEBOUNCE_WINDOW_MS),
+      })
+      .strict()
+      .optional(),
+    burstBreaker: z
+      .object({
+        enabled: z.boolean().optional().default(true),
+        maxTurns: z.number().int().positive().optional().default(DEFAULT_BURST_MAX_TURNS),
+        maxMessages: z.number().int().positive().optional().default(DEFAULT_BURST_MAX_MESSAGES),
+        windowMs: z.number().int().positive().optional().default(DEFAULT_BURST_WINDOW_MS),
+        pausedMs: z.number().int().positive().optional().default(DEFAULT_BURST_PAUSED_MS),
+      })
+      .strict()
+      .optional(),
+    spool: z
+      .object({
+        enabled: z.boolean().optional().default(true),
+        resendOnReconnect: z.boolean().optional().default(true),
+        maxAgeMs: z.number().int().positive().optional().default(DEFAULT_SPOOL_MAX_AGE_MS),
+        maxAttempts: z.number().int().positive().optional().default(DEFAULT_SPOOL_MAX_ATTEMPTS),
+      })
+      .strict()
+      .optional(),
+    dispatchDedupe: z
+      .object({
+        enabled: z.boolean().optional().default(true),
+        ttlMs: z.number().int().positive().optional().default(DEFAULT_DISPATCH_DEDUPE_TTL_MS),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
+const XmppHistorySchema = z
+  .object({
+    catchup: z.boolean().optional().default(false),
+    spawnTurns: z.boolean().optional().default(false),
+    windowMs: z.number().int().positive().optional().default(DEFAULT_HISTORY_WINDOW_MS),
+    maxPages: z.number().int().positive().optional().default(DEFAULT_HISTORY_MAX_PAGES),
+    mucMaxStanzas: z.number().int().nonnegative().optional().default(DEFAULT_HISTORY_MUC_MAX_STANZAS),
+  })
+  .strict()
+  .optional();
+
+const XmppHooksSchema = z
+  .object({
+    pepEvents: z.boolean().optional().default(false),
+    reactions: z.boolean().optional().default(false),
+    receipts: z.boolean().optional().default(true),
+  })
+  .strict()
+  .optional();
+
 
 const XmppGroupSchema = z
   .object({
@@ -66,6 +139,9 @@ const XmppAccountSchemaBase = z
       })
       .strict()
       .optional(),
+    reliability: XmppReliabilitySchema,
+    history: XmppHistorySchema,
+    hooks: XmppHooksSchema,
     ...ReplyRuntimeConfigSchemaShape,
   })
   .strict();

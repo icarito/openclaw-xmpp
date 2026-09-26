@@ -175,6 +175,11 @@ export function handleMucPresence(
   if (statusCodes.has("100") || statusCodes.has("172")) {
     room.anonymity = "non-anonymous";
     log?.debug?.(`[${accountId}] Room ${roomJid} is non-anonymous (OMEMO-capable)`);
+  } else if (statusCodes.has("170")) {
+    // XEP-0045 §21.4: 170 = room is semi-anonymous. Tracked explicitly so
+    // reaction emission (XEP-0444) can log the correct elision reason.
+    room.anonymity = "semi-anonymous";
+    log?.debug?.(`[${accountId}] Room ${roomJid} is semi-anonymous`);
   }
 
   // Check if this is self-presence

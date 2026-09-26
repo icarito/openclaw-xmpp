@@ -17,11 +17,38 @@ import { client, xml, type Client } from "@xmpp/client";
 import type { Element } from "@xmpp/xml";
 
 import type { ResolvedXmppAccount } from "./accounts.js";
+import { getOriginId } from "./protocol.js";
+import type { OutboundSpool } from "./outbound-spool.js";
 
 // @xmpp/stream-management clears its resumable id on offline. Keep the last
 // id outside the client instance so a supervised reconnect can resume it.
 const lastStreamIds = new Map<string, string>();
 const lastInboundCounts = new Map<string, number>();
+
+const NS_SM = "urn:xmpp:sm:3";
+
+/**
+ * XEP-0045 MUC join presence with explicit history control. `maxstanzas=0`
+ * disables the server replay so the MAM catch-up owns history recovery; a
+ * configured positive value is honored when the operator wants join history.
+ */
+export function buildMucJoinPresence(roomBareJid: string, nick: string, maxStanzas = 0): Element {
+  const history = Number.isFinite(maxStanzas) && maxStanzas > 0
+    ? { maxstanzas: String(Math.floor(maxStanzas)) }
+    : { maxstanzas: "0" };
+  return xml(
+    "presence",
+    { to: `${roomBareJid}/${nick}` },
+    xml("x", { xmlns: "http://jabber.org/protocol/muc" }, xml("history", history)),
+  );
+}
+
+export type XmppStreamManagementEvent =
+  | { type: "online"; resumed: boolean }
+  | { type: "resumed"; h: number }
+  | { type: "ack"; h: number }
+  | { type: "failed" }
+  | { type: "offline" };
 
 export type XmppInboundStanzaEvent = {
   stanza: Element;
@@ -34,6 +61,16 @@ export type XmppClientOptions = {
   onOffline?: () => void;
   onError?: (error: Error) => void;
   onStanza?: (stanza: Element) => void;
+  /** Explicit XEP-0198 observability (acks/resume) for the outbound spool. */
+  onStreamManagement?: (event: XmppStreamManagementEvent) => void;
+  /** Spool used to track which outbound stanzas the server has handled. */
+  outboundSpool?: OutboundSpool;
+  /**
+   * Explicit MUC history control (XEP-0045 <history maxstanzas/>). Default 0:
+   * do not let the server replay room history on join; the MAM catch-up owns
+   * history recovery instead.
+   */
+  mucMaxStanzas?: number;
   /** IQ handler for disco#items / disco#info / ad-hoc commands (XEP-0050), wired to @xmpp/client's iqCallee below. */
   handleIq?: (stanza: Element) => Promise<Element | undefined>;
   log?: {
@@ -49,6 +86,10 @@ export type XmppConnection = {
   isConnected: () => boolean;
   send: (stanza: Element) => Promise<void>;
   joinRoom: (roomBareJid: string, nick: string) => Promise<void>;
+  /** disco#info query (XEP-0030) used by the feature preflight. */
+  discoInfo: (jid: string) => Promise<Element | undefined>;
+  /** Raw IQ request (used by the XEP-0313 MAM client). */
+  iqRequest: (stanza: Element, timeoutMs?: number) => Promise<Element>;
   stop: () => Promise<void>;
 };
 
@@ -92,6 +133,14 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
 
   const log = options.log ?? {};
   const connectionLabel = `${account.jid}/${account.resource || "openclaw"}`;
+  const outboundSpool = options.outboundSpool;
+
+  // Every outbound stanza is counted on the current stream so an XEP-0198
+  // `<a h="…"/>` can mark spooled messages the server actually handled.
+  const trackedSend = async (stanza: Element): Promise<void> => {
+    await xmpp.send(stanza);
+    outboundSpool?.noteSent(getOriginId(stanza));
+  };
 
   xmpp.on("error", (err: Error) => {
     log.warn?.(`XMPP connection error: ${err.message}`);
@@ -100,6 +149,27 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
 
   xmpp.on("status", (status: string) => {
     log.info?.(`XMPP connection status: ${status} (${connectionLabel})`);
+  });
+
+  // @xmpp/stream-management does not surface acks/resume as events; observe
+  // the raw nonzas so the spool can react to them explicitly (D1).
+  xmpp.on("nonza", (nonza: Element) => {
+    if (nonza.is("a", NS_SM)) {
+      const h = Number(nonza.attrs.h);
+      if (Number.isFinite(h)) options.onStreamManagement?.({ type: "ack", h });
+      return;
+    }
+    if (nonza.is("resumed", NS_SM)) {
+      const h = Number(nonza.attrs.h);
+      options.onStreamManagement?.({
+        type: "resumed",
+        h: Number.isFinite(h) ? h : 0,
+      });
+      return;
+    }
+    if (nonza.is("failed", NS_SM)) {
+      options.onStreamManagement?.({ type: "failed" });
+    }
   });
 
   // @xmpp/reconnect (bundled in @xmpp/client) already retries on
@@ -114,16 +184,11 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
   });
 
   const botNick = localpart;
-  const mucJoinPresence = (roomBareJid: string, nick: string) =>
-    xml(
-      "presence",
-      { to: `${roomBareJid}/${nick}` },
-      xml("x", { xmlns: "http://jabber.org/protocol/muc" }),
-    );
+  const mucMaxStanzas = options.mucMaxStanzas ?? 0;
 
   const rejoinRooms = async (): Promise<void> => {
     for (const room of joinedRooms) {
-      await xmpp.send(mucJoinPresence(room, botNick));
+      await trackedSend(buildMucJoinPresence(room, botNick, mucMaxStanzas));
       log.info?.(`XMPP joined MUC room ${room} as ${botNick}`);
     }
     if (joinedRooms.size > 0) {
@@ -134,7 +199,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
   const joinRoom = async (roomBareJid: string, nick: string): Promise<void> => {
     joinedRooms.add(roomBareJid);
     if (connected) {
-      await xmpp.send(mucJoinPresence(roomBareJid, nick));
+      await trackedSend(buildMucJoinPresence(roomBareJid, nick, mucMaxStanzas));
       log.info?.(`XMPP joined MUC room ${roomBareJid} as ${nick}`);
     }
   };
@@ -163,6 +228,8 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     } catch (err) {
       log.warn?.(`XMPP ping timeout — forcing reconnect: ${String(err)}`);
       await xmpp.disconnect().catch(() => {});
+    } finally {
+      outboundSpool?.noteSent();
     }
   };
 
@@ -187,6 +254,8 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
   xmpp.on("online", async () => {
     connected = true;
     backoffMs = BACKOFF_BASE_MS;
+    const resumed = smEnabled && Boolean(previousStreamId) && sm?.id === previousStreamId;
+    options.onStreamManagement?.({ type: "online", resumed });
     try {
       await rejoinRooms();
     } catch (err) {
@@ -198,7 +267,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     pingTimer = setInterval(() => void sendPing(), PING_INTERVAL_MS);
     log.info?.(`XMPP channel connected as ${connectionLabel}`);
     try {
-      await xmpp.send(xml(
+      await trackedSend(xml(
         "iq",
         { type: "set", id: `carbons-${Date.now()}` },
         xml("enable", { xmlns: "urn:xmpp:carbons:2" }),
@@ -222,6 +291,7 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
     connected = false;
     stopPing();
     log.warn?.(`XMPP channel disconnected (${connectionLabel})`);
+    options.onStreamManagement?.({ type: "offline" });
     options.onOffline?.();
   });
 
@@ -274,9 +344,23 @@ export async function connectXmppClient(options: XmppClientOptions): Promise<Xmp
       if (!connected) {
         throw new Error(`XMPP account ${account.accountId} is not connected`);
       }
-      await xmpp.send(stanza);
+      await trackedSend(stanza);
     },
     joinRoom,
+    discoInfo: async (jid: string): Promise<Element | undefined> => {
+      const response = await xmpp.iqCaller.request(
+        xml(
+          "iq",
+          { type: "get", to: jid, id: `disco-${Date.now().toString(36)}` },
+          xml("query", { xmlns: "http://jabber.org/protocol/disco#info" }),
+        ),
+        10_000,
+      );
+      return response.is("query", "http://jabber.org/protocol/disco#info")
+        ? response
+        : response.getChild("query", "http://jabber.org/protocol/disco#info") ?? undefined;
+    },
+    iqRequest: (stanza: Element, timeoutMs = 30_000) => xmpp.iqCaller.request(stanza, timeoutMs),
     stop: async () => {
       connected = false;
       stopPing();

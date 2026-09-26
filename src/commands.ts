@@ -47,7 +47,11 @@ import { TextualFallback } from "./textual-fallback.js";
 import { buildCorrectionStanza, buildQueryCommandStanza, buildQuickResponseStanza, resolveInlineButtonsScope } from "./outbound-render.js";
 import { clearXmppCommandNodes, consumeXmppCommandNode, consumeXmppCommandResponse, registerXmppCommandNode, registerXmppCommandResponse, restoreXmppCommandNode } from "./command-node-registry.js";
 import { normalizeXmppOptions, matchOptionReply, shortQuestionId } from "./ask-question.js";
-import { clearXmppAccountActivity } from "./activity-registry.js";
+import { clearXmppAccountActivity, getXmppAccountActivity } from "./activity-registry.js";
+import { resolveReliabilityConfig } from "./config-defaults.js";
+import { getOutboundSpool, resolveOutboundSpoolPath } from "./outbound-spool.js";
+import { getDispatchDedupe, resolveDispatchDedupePath } from "./dispatch-dedupe.js";
+import { describeXmppFeaturePreflight } from "./preflight-features.js";
 import { getActiveXmppConnection } from "./connection-registry.js";
 import { isGroupJid } from "./normalize.js";
 import { nextStanzaId } from "./protocol.js";
@@ -99,7 +103,37 @@ function buildAccountActions(params: {
       description: "Shows this XMPP account's connection status.",
       params: [],
       mutating: false,
-      handler: () => `Connected as ${account.jid} (accountId=${account.accountId}).`,
+      handler: () => {
+        // Read-side real (tarea 7.3): el estado de conexión se consulta a la
+        // conexión activa en vez de asumirse, y la actividad sale del registro
+        // vivo. El node `credit` ya reporta telemetría real (readAgentTelemetry).
+        const connection = getActiveXmppConnection(account.accountId);
+        const connected = connection?.isConnected() === true;
+        const activity = getXmppAccountActivity(account.accountId)?.activity ?? "available";
+        const reliability = resolveReliabilityConfig(account.config);
+        const lines = [
+          `${connected ? "Connected" : "Disconnected"} as ${account.jid} (accountId=${account.accountId}, activity=${activity}).`,
+          describeXmppFeaturePreflight(account.accountId),
+        ];
+        if (reliability.spool.enabled) {
+          const spool = getOutboundSpool(account.accountId, {
+            path: resolveOutboundSpoolPath(account.accountId),
+            maxAgeMs: reliability.spool.maxAgeMs,
+            maxAttempts: reliability.spool.maxAttempts,
+          });
+          const stats = spool.stats();
+          lines.push(`Spool: ${stats.pending} pending, ${stats.dead} dead-letter.`);
+        }
+        if (reliability.dispatchDedupe.enabled) {
+          const dedupe = getDispatchDedupe(account.accountId, {
+            path: resolveDispatchDedupePath(account.accountId),
+            ttlMs: reliability.dispatchDedupe.ttlMs,
+          });
+          const stats = dedupe.stats();
+          lines.push(`Dispatch dedupe: ${stats.committed} committed, ${stats.pending} pending.`);
+        }
+        return lines.join("\n");
+      },
     },
     {
       node: "credit",

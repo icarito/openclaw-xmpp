@@ -25,8 +25,21 @@ import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-run
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { convertMarkdownTables } from "openclaw/plugin-sdk/text-chunking";
 import { resolveXmppAccount } from "./accounts.js";
+import type { ResolvedXmppAccount } from "./accounts.js";
 import { bareJid, isGroupJid, normalizeXmppMessagingTarget } from "./normalize.js";
-import { attachmentLabel, markdownToPlain, nextStanzaId, splitForLimit, XMPP_MAX_BODY } from "./protocol.js";
+import {
+  attachmentLabel,
+  buildOriginIdElement,
+  buildReceiptRequest,
+  markdownToPlain,
+  nextStanzaId,
+  splitForLimit,
+  XMPP_MAX_BODY,
+} from "./protocol.js";
+import { resolveHooksConfig, resolveReliabilityConfig } from "./config-defaults.js";
+import { getOutboundBurstBreaker } from "./burst-breaker.js";
+import { getOutboundSpool, resolveOutboundSpoolPath } from "./outbound-spool.js";
+import { buildReplyElements, getInboundReplyContext } from "./reply-context.js";
 import { CAPS_FEATURES, CAPS_IDENTITY, CAPS_NODE } from "./xep-0050.js";
 import { getXmppRuntime } from "./runtime.js";
 import { getActiveXmppConnection } from "./connection-registry.js";
@@ -46,6 +59,8 @@ type SendXmppOptions = {
   accountId?: string;
   replyTo?: string;
   target?: string;
+  /** Transient send (progress placeholder, edit of a partial): not spooled, no receipt request. */
+  ephemeral?: boolean;
 };
 
 type SendXmppMediaOptions = SendXmppOptions & {
@@ -280,6 +295,27 @@ function buildStatusPresence(
 }
 
 /**
+ * Burst breaker por cuenta: al tripular publica la actividad `paused` y una
+ * presencia away hacia el destino, sin descartar nunca el turno final. Solo
+ * el lane de reintento (`normal`) queda frenado; control/aprobaciones y el
+ * turno final están exentos.
+ */
+function resolveAccountBurstBreaker(account: ResolvedXmppAccount) {
+  const { burstBreaker } = resolveReliabilityConfig(account.config);
+  return getOutboundBurstBreaker(account.accountId, burstBreaker, (destination) => {
+    setXmppAccountActivity(account.accountId, "paused", destination);
+    const connection = getActiveXmppConnection(account.accountId);
+    if (connection?.isConnected()) {
+      try {
+        void connection.send(buildStatusPresence(destination, "paused"));
+      } catch {
+        // best-effort
+      }
+    }
+  });
+}
+
+/**
  * Publica de inmediato que un mensaje entró y está en cola, sin esperar al
  * siguiente tick del loop de telemetría (10s). El registro en memoria
  * (activity-registry) es lo que decide si el agente ya estaba "busy" -- en
@@ -369,6 +405,8 @@ export async function sendMessageXmpp(
       isConnected: () => true,
       send: async (stanza) => { await transient.send(stanza); },
       joinRoom: async () => {},
+      discoInfo: async () => undefined,
+      iqRequest: (stanza, timeoutMs = 30_000) => transient.iqCaller.request(stanza, timeoutMs),
       stop: async () => { await transient.stop(); },
     };
     transientCleanup = async () => { await transient.stop(); };
@@ -381,6 +419,50 @@ export async function sendMessageXmpp(
       channel: "xmpp",
       accountId: account.accountId,
     });
+    const reliability = resolveReliabilityConfig(account.config);
+    const hooks = resolveHooksConfig(account.config);
+    const durable = opts.ephemeral !== true;
+    const spoolEnabled = durable && reliability.spool.enabled;
+    const spool = spoolEnabled
+      ? getOutboundSpool(account.accountId, {
+          path: resolveOutboundSpoolPath(account.accountId),
+          maxAgeMs: reliability.spool.maxAgeMs,
+          maxAttempts: reliability.spool.maxAttempts,
+        })
+      : null;
+    const breaker = resolveAccountBurstBreaker(account);
+    // La conexión persistente (registrada por monitor) ya cuenta cada envío
+    // en su ledger XEP-0198 vía client.trackedSend; la transitoria no, así que
+    // solo en ese caso el spool contabiliza el envío desde aquí.
+    const usingPersistentConnection = connection === getActiveXmppConnection(account.accountId);
+    // XEP-0461: recuperar el remitente y el texto originales para la cita.
+    // Sólo se emite en la ruta de texto plano: con OMEMO el plugin sólo cifra
+    // el <body> (una <reply/> hermana filtraría metadatos), así que ahí se
+    // omite.
+    const replyContext = durable && opts.replyTo
+      ? getInboundReplyContext(account.accountId, opts.replyTo)
+      : undefined;
+    const replyElementsForChunk = (chunkIndex: number): Element[] => {
+      if (!durable || !opts.replyTo || chunkIndex !== 0) return [];
+      const to = replyContext?.to ?? (type === "chat" ? target : undefined);
+      if (!to) return [];
+      return buildReplyElements({ id: opts.replyTo, to, ...(replyContext?.text ? { text: replyContext.text } : {}) });
+    };
+    const sendDurable = async (stanza: Element, id: string, turn: boolean): Promise<void> => {
+      if (durable) {
+        stanza.append(buildOriginIdElement(id));
+        if (hooks.receipts) stanza.append(buildReceiptRequest());
+        spool?.enqueue({ originId: id, to: target, type, stanza });
+      }
+      try {
+        await connection.send(stanza);
+      } catch (error) {
+        spool?.requeue(id, error);
+        throw error;
+      }
+      if (!usingPersistentConnection) spool?.noteSent(durable ? id : undefined);
+      breaker.record(target, "final", { turn });
+    };
     try {
       for (let i = 0; i < chunks.length; i++) {
         const id = nextStanzaId();
@@ -404,7 +486,7 @@ export async function sendMessageXmpp(
           if (encryptedElement) {
             const stanza = buildOmemoMessageStanza(target, encryptedElement, type);
             stanza.attrs.id = id;
-            await connection.send(stanza);
+            await sendDurable(stanza, id, i === chunks.length - 1);
             continue;
           }
           if (account.config.omemo.requireEncryption) {
@@ -412,7 +494,11 @@ export async function sendMessageXmpp(
           }
         }
 
-        await connection.send(xml("message", { type, to: target, id }, xml("body", {}, chunks[i]!)));
+        await sendDurable(
+          xml("message", { type, to: target, id }, xml("body", {}, chunks[i]!), ...replyElementsForChunk(i)),
+          id,
+          i === chunks.length - 1,
+        );
       }
     } finally {
       // Pase lo que pase con el cuerpo, el agente deja de estar ocupado: si
@@ -826,6 +912,8 @@ export async function sendEditXmpp(
      * va sin el hint: esa sí debe notificar y quedar en el archivo.
      */
     ephemeral?: boolean;
+    /** XEP-0461: id del mensaje entrante al que esta edición final responde. */
+    replyTo?: string;
   },
 ): Promise<SendXmppResult> {
   const cfg = requireRuntimeConfig(opts.cfg, "XMPP edit") as CoreConfig;
@@ -842,6 +930,22 @@ export async function sendEditXmpp(
   const type = isGroupJid(target, account.mucDomain) ? "groupchat" : "chat";
   const id = nextStanzaId();
   const body = plain.length > XMPP_MAX_BODY ? splitForLimit(plain, XMPP_MAX_BODY)[0]! : plain;
+  // Solo la edición FINAL (no efímera) es un final durable: ahí sí van
+  // origin-id y solicitud de receipt XEP-0184. Los parciales llevan
+  // <no-store/> y jamás solicitan acuse.
+  const hooks = resolveHooksConfig(account.config);
+  const durableEdit = opts.ephemeral !== true && hooks.receipts;
+  // XEP-0461 en la edición FINAL (la que se convierte en la respuesta). Con
+  // OMEMO se omite: el plugin sólo cifra el <body>, y una <reply/> hermana
+  // filtraría metadatos del mensaje citado.
+  const replyElements = !opts.ephemeral && opts.replyTo && !account.config.omemo?.enabled
+    ? (() => {
+        const ctx = getInboundReplyContext(account.accountId, opts.replyTo!);
+        const to = ctx?.to ?? (type === "chat" ? target : undefined);
+        if (!to) return [] as Element[];
+        return buildReplyElements({ id: opts.replyTo!, to, ...(ctx?.text ? { text: ctx.text } : {}) });
+      })()
+    : [];
 
   // Keep the XEP-0308 correlation on the outer stanza while encrypting only
   // the edited body. <replace/> exposes the stanza id being corrected, not
@@ -872,6 +976,10 @@ export async function sendEditXmpp(
         ephemeral: opts.ephemeral,
       });
       stanza.attrs.id = id;
+      if (durableEdit) {
+        stanza.append(buildOriginIdElement(id));
+        stanza.append(buildReceiptRequest());
+      }
       await connection.send(stanza);
       recordXmppOutboundActivity(account.accountId);
       return {
@@ -893,7 +1001,9 @@ export async function sendEditXmpp(
       { type, to: target, id },
       xml("body", {}, body),
       xml("replace", { xmlns: "urn:xmpp:message-correct:0", id: editTargetId }),
+      ...replyElements,
       ...(opts.ephemeral ? [xml("no-store", { xmlns: "urn:xmpp:hints" })] : []),
+      ...(durableEdit ? [buildOriginIdElement(id), buildReceiptRequest()] : []),
     ),
   );
   recordXmppOutboundActivity(account.accountId);

@@ -47,4 +47,65 @@ export const xmppChannelConfigUiHints = {
     label: "XMPP Context Window Tokens",
     help: "Context window size used to compute the /context percentage shown in ad-hoc commands.",
   },
+  reliability: {
+    label: "Fiabilidad de entrega",
+    help: "Spool de salientes, debounce de entrada, burst breaker y dedupe durable de despacho.",
+  },
+  "reliability.debounce.enabled": {
+    label: "Debounce de entrada",
+    help: "Fusiona ráfagas del mismo remitente en un único turno.",
+  },
+  "reliability.debounce.windowMs": {
+    label: "Ventana de debounce (ms)",
+    help: "Inactividad necesaria antes de despachar la ráfaga fusionada. Default 1500.",
+    advanced: true,
+  },
+  "reliability.burstBreaker.enabled": {
+    label: "Burst breaker de salida",
+    help: "Limita turnos/mensajes por destino y pausa cadenas de reintento auto-sostenidas.",
+  },
+  "reliability.burstBreaker.maxMessages": {
+    label: "Máximo de mensajes por ventana",
+    help: "Mensajes de salida permitidos por destino dentro de la ventana.",
+    advanced: true,
+  },
+  "reliability.spool.enabled": {
+    label: "Spool de salientes",
+    help: "Persiste salientes no reconocidos (XEP-0198/XEP-0184) para reenviarlos al reconectar.",
+  },
+  "reliability.spool.resendOnReconnect": {
+    label: "Reenviar al reconectar",
+    help: "Reenvía pendientes del spool al abrir sesión nueva o tras un resume fallido.",
+  },
+  "reliability.dispatchDedupe.ttlMs": {
+    label: "TTL del dedupe de despacho (ms)",
+    help: "Retención de claims de despacho; default 7 días.",
+    advanced: true,
+  },
+  history: {
+    label: "Historial XEP-0313",
+    help: "Catch-up de historial vía MAM (fase B); por defecto observacional.",
+  },
+  "history.catchup": {
+    label: "Catch-up de historial",
+    help: "Recupera mensajes desde el último archive-id visto al reconectar.",
+  },
+  hooks: {
+    label: "Hooks para clientes ad-hoc",
+    help: "Eventos PEP, reacciones XEP-0444 y receipts XEP-0184.",
+  },
+  "hooks.receipts": {
+    label: "Receipts XEP-0184",
+    help: "Solicita acuse de recibo en finales durables y responde a los recibidos.",
+  },
+  "hooks.reactions": {
+    label: "Reacciones XEP-0444",
+    help: "Reacciones salientes opt-in (fase C).",
+    advanced: true,
+  },
+  "hooks.pepEvents": {
+    label: "Eventos PEP",
+    help: "Publica nodos PEP versionados con actividad/aprobación/progreso (fase C).",
+    advanced: true,
+  },
 } satisfies Record<string, ChannelConfigUiHint>;

@@ -163,3 +163,78 @@ If `source` is under `/agents/<id>/` or `/workspaces/<id>/`, the gateway infers
 
 The gateway publishes both XEP-0084 and XEP-0153 avatar data, then telemetry
 presence re-announces the avatar hash so clients refresh their roster cache.
+
+## Servidor XMPP: MAM, retención y preflight
+
+El plugin no guarda historial propio: **el archivo del servidor es la fuente
+de verdad** (XEP-0313). Para que el catch-up de reconexión y la lectura de
+historial de clientes funcionen, el host debe cumplir:
+
+- `mod_mam` habilitado en la cuenta (archivo 1:1).
+- `mod_mam` / `muc_mam` habilitado en el dominio MUC (archivo de salas).
+- Retención suficiente: el default de Prosody es **1 semana**
+  (`archive_expires_after = "1w"`, `muc_log_expires_after = "1w"`). El
+  plugin no pretende recuperar más allá de la retención real.
+
+El plugin sondea el disco#info del bare JID y del dominio MUC al conectar
+(preflight, `src/preflight-features.ts`) y cachea si el servidor anuncia
+`urn:xmpp:mam:2`. El resultado se ve en el node `status`:
+
+```text
+Server features: server MAM v2 yes, MUC conference.example.org MAM v2 yes.
+```
+
+### Verificar y habilitar en Prosody
+
+```bash
+# ¿Está cargado el módulo y con qué retención?
+prosodyctl shell module:info('mam')
+prosodyctl shell module:info('muc_mam')
+
+# Config efectiva del archivo (1:1 y salas)
+prosodyctl shell 'config.get("mam", "archive_expires_after")'
+prosodyctl shell 'config.get("muc_mam", "muc_log_expires_after")'
+
+# Comprobar que el servidor anuncia MAM por disco#info (desde un cliente o
+# xmpp-console); el plugin lo hace igual al conectar.
+```
+
+Si la retención es menor que `history.windowMs`, ajusta la ventana del
+plugin (o la retención del servidor) para que no soliciten más de lo que el
+archivo conserva. `archive_expires_after = "never"` también es válido si se
+quiere historial ilimitado.
+
+### Degradación
+
+Todo el catch-up es **fail-closed**:
+
+- Si el preflight no ve `urn:xmpp:mam:2`, el catch-up se desactiva y queda el
+  comportamiento anterior (guard de stanzas retrasadas + dedupe).
+- Si el ancla del watermark fue purgada, se degrada a *fetch-latest*.
+- Si una consulta MAM falla, se registra y el turno/canal sigue igual.
+
+## Flags nuevos de configuración y degradación
+
+Las secciones `reliability`, `history` y `hooks` de `channels.xmpp` (o por
+cuenta) controlan las capas de fiabilidad, historial y hooks. Todos los
+defaults son conservadores: una capa deshabilitada o un servidor sin soporte
+nunca rompe el chat.
+
+| Flag | Default | Qué hace | Cómo degrada |
+|---|---|---|---|
+| `reliability.spool.enabled` | `true` | Spool persistente de salientes no reconocidos (XEP-0198/XEP-0184). | Sin spool, el reenvío tras reconexión no existe; el resto del envío sigue. |
+| `reliability.spool.resendOnReconnect` | `true` | Reenvía pendientes al abrir sesión nueva o tras resume fallido. | `false` conserva el spool pero no reenvía automáticamente. |
+| `reliability.debounce.enabled` | `true` | Fusiona ráfagas del mismo remitente en un turno. | `false` = un turno por mensaje (comportamiento previo). |
+| `reliability.burstBreaker.enabled` | `true` | Limita turnos/mensajes por destino y pausa cadenas de reintento. | `false` = sin freno estructural de salida. |
+| `reliability.dispatchDedupe.enabled` | `true` | Dedupe durable de despacho (TTL 7d) para no re-ejecutar turnos. | `false` = dedupe solo en memoria durante el proceso. |
+| `history.catchup` | `false` | Recupera historial MAM al reconectar. | Requiere MAM v2 en el servidor; sin él queda apagado. |
+| `history.spawnTurns` | `false` | Convierte cada mensaje recuperado en turno. | `false` = modo observacional (solo contexto). |
+| `history.windowMs` / `history.maxPages` / `history.mucMaxStanzas` | 7d / 4 / 0 | Ventana máxima, tope de páginas RSM y control de historial en el join MUC. | Ajustar a la retención real del servidor. |
+| `hooks.receipts` | `true` | XEP-0184 en finales durables y respuesta a los recibidos. | `false` = sin acuses. |
+| `hooks.pepEvents` | `false` | Publica los nodos PEP `urn:openclaw:hooks:*:0`. | `false` = clientes deben usar XEP-0050/status. |
+| `hooks.reactions` | `false` | Emite reacciones XEP-0444 (DM siempre; MUC solo non-anonymous). | `false` = sin reacciones; entrantes se ignoran igual. |
+
+Los defaults del burst breaker y del debounce viven en `src/config-defaults.ts`
+y son la fuente de verdad compartida por el esquema zod y los resolvers de
+runtime.
+
