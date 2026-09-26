@@ -108,7 +108,11 @@
       documentado con resultados; los casos que requieran servidor
       quedan marcados como pendientes de sesión primaria
       (→ `verification.md` en este change)
-- [ ] 8.6 Nota en el change para claudio-w: actualizar la fila del
+- [x] 8.6 Nota en el change para claudio-w: actualizar la fila del
       programa XMPP↔Telegram en `openspec/ROADMAP.md` tras el apply
       (el deploy y el bump del gitlink son fases posteriores de sesión
       primaria, fuera de este change)
+      — hecho 2026-09-26: deploy en producción tag `v2026.9.0`
+      (`10b321a`), gitlink de claudio-w en `v2026.9.0`, DEPLOY-LOG con
+      postcheck (9 cuentas running, eventLoop limpio, Prosody MAM
+      verificado), fila ROADMAP actualizada.
