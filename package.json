@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/xmpp",
-  "version": "2026.9.0",
+  "version": "2026.9.1",
   "description": "OpenClaw XMPP channel plugin",
   "type": "module",
   "scripts": {

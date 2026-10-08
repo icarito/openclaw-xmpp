@@ -27,6 +27,7 @@ import { convertMarkdownTables } from "openclaw/plugin-sdk/text-chunking";
 import { resolveXmppAccount } from "./accounts.js";
 import type { ResolvedXmppAccount } from "./accounts.js";
 import { bareJid, isGroupJid, normalizeXmppMessagingTarget } from "./normalize.js";
+import { shouldEncryptDirect } from "./omemo/inbound-mirror.js";
 import {
   attachmentLabel,
   buildOriginIdElement,
@@ -476,7 +477,7 @@ export async function sendMessageXmpp(
             } else {
               logger.warn(`[${account.accountId}] OMEMO MUC fallback: room ${target} is semi-anonymous/anonymous or has no occupants with OMEMO, sending plaintext`);
             }
-          } else {
+          } else if (shouldEncryptDirect(account.accountId, bareJid(target), account.config.omemo)) {
             encryptedElement = await encryptOmemoMessage(account.accountId, target, chunks[i]!, logger);
             if (!encryptedElement) {
               logger.warn(`[${account.accountId}] OMEMO fallback: recipient ${target} has no OMEMO devices published, sending plaintext`);
@@ -963,7 +964,7 @@ export async function sendEditXmpp(
       } else {
         logger.warn(`[${account.accountId}] OMEMO MUC edit fallback: room ${target} is not OMEMO-capable`);
       }
-    } else {
+    } else if (shouldEncryptDirect(account.accountId, bareJid(target), account.config.omemo)) {
       encryptedElement = await encryptOmemoMessage(account.accountId, target, body, logger);
       if (!encryptedElement) {
         logger.warn(`[${account.accountId}] OMEMO edit fallback: recipient ${target} has no compatible devices`);

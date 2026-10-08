@@ -135,6 +135,8 @@ export type XmppAccountConfig = {
     protocol?: "legacy" | "v2" | "dual";
     /** Refuse plaintext when OMEMO cannot encrypt a message. */
     requireEncryption?: boolean;
+    /** Reply in plaintext to peers whose last direct message was plaintext (default true). */
+    mirrorInbound?: boolean;
   };
   streamManagement?: {
     enabled?: boolean;

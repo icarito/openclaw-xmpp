@@ -19,6 +19,7 @@ import { connectXmppClient, type XmppConnection } from "./client.js";
 import { registerActiveXmppConnection, unregisterActiveXmppConnection } from "./connection-registry.js";
 import { handleXmppInbound } from "./inbound.js";
 import { bareJid, isGroupJid } from "./normalize.js";
+import { noteInboundEncryption } from "./omemo/inbound-mirror.js";
 import {
   buildChatMarker,
   buildReceiptReceived,
@@ -749,6 +750,10 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
 
     const platformId = bareJid(from);
     const isGroup = type === "groupchat" || isGroupJid(platformId, account.mucDomain);
+    // Recordar si el peer escribió cifrado, para espejar la respuesta (send.ts).
+    if (!isGroup && !isCarbonCopy) {
+      noteInboundEncryption(account.accountId, platformId, isOmemoEncrypted(realStanza));
+    }
 
     // MUC reflects our own messages back to us.
     if (type === "groupchat") {

@@ -136,6 +136,7 @@ const XmppAccountSchemaBase = z
         deviceLabel: z.string().optional(),
         protocol: z.enum(["legacy", "v2", "dual"]).optional(),
         requireEncryption: z.boolean().optional(),
+        mirrorInbound: z.boolean().optional(),
       })
       .strict()
       .optional(),
