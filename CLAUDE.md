@@ -12,10 +12,12 @@ record any pre-existing blocker explicitly.
 
 ## Deployment trap
 
-This checkout is not the running service. Production currently loads
-`/opt/claudio-w/extensions-xmpp-src/`; never claim a deployment from a local
-build and never touch production from a delegated change. `claudio-w` consumes
-this repository as the `extensions/xmpp` submodule.
+This checkout is not the running service. Production loads
+`/opt/claudio-w/repos/openclaw-xmpp` (a Git clone pinned at a release tag,
+registered via `plugins.load.paths`), not this working tree. Never claim a
+deployment from a local build and never touch production from a delegated
+change. Installing this transport on a *standard* OpenClaw is documented in
+`INSTALL.md`.
 
 Operational details are in `OPERATIONS.md`; upstream-port notes are in
 `PORT-NOTES.md`.
