@@ -76,6 +76,7 @@ import {
   decryptOmemoMessage,
   isOmemoEncrypted,
   handleMucPresence,
+  getOccupantRealJid,
 } from "./omemo/index.js";
 
 type XmppMonitorOptions = {
@@ -358,11 +359,14 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     const platformId = bareJid(from);
     const isGroup = archived.type === "groupchat" || isGroupJid(platformId, account.mucDomain);
     const senderNick = isGroup ? from.split("/")[1] : undefined;
+    const senderJid = isGroup
+      ? (senderNick ? getOccupantRealJid(account.accountId, platformId, senderNick) : null) ?? ""
+      : platformId;
     const message: XmppInboundMessage = {
       messageId: archived.originId ?? archived.archiveId?.id ?? makeXmppMessageId(),
       target: platformId,
       rawFrom: from,
-      senderJid: platformId,
+      senderJid,
       ...(senderNick ? { senderNick } : {}),
       text: archived.body,
       timestamp: archived.delayMs ?? Date.now(),
@@ -825,6 +829,11 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
     if (commandRuntime.hasPending(platformId)) return;
 
     const senderNick = isGroup ? from.split("/")[1] : undefined;
+    // The MUC address identifies the room, never the sender. Only the real
+    // JID learned from non-anonymous occupant presence may pass an allowlist.
+    const senderJid = isGroup
+      ? (senderNick ? getOccupantRealJid(account.accountId, platformId, senderNick) : null) ?? ""
+      : platformId;
     const wasMentioned = isGroup ? messageMentionsBot(realStanza, body, botNick, account.jid) : true;
     const replyTo = extractReply(realStanza) ?? undefined;
 
@@ -832,7 +841,7 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
       messageId: (realStanza.attrs.id as string) || makeXmppMessageId(),
       target: platformId,
       rawFrom: from,
-      senderJid: isGroup ? platformId : platformId,
+      senderJid,
       senderNick,
       text: body,
       timestamp: Date.now(),
