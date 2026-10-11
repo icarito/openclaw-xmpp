@@ -129,18 +129,11 @@ function untrackApproval(sessionKey: string): void {
   activeSessionApprovals.delete(sessionKey);
 }
 
-/** Rechazo por guard de concurrencia, NO un fallo de entrega.
- *  Se distingue por tipo porque onDeliveryError debe liberar el guard cuando
- *  la entrega falló de verdad, pero NUNCA cuando fue el propio guard quien
- *  rechazó: ese sessionKey pertenece a la aprobación que sigue en vuelo, y
- *  liberarlo reabriría el bug de las promesas huérfanas por otra puerta. */
-class XmppApprovalGuardRejection extends Error {
-  readonly isGuardRejection = true;
-}
-
-function isGuardRejection(error: unknown): boolean {
-  return error instanceof XmppApprovalGuardRejection;
-}
+/** Aprobaciones entregadas mientras otra de la misma sesión ocupaba la ranura
+ *  del guard. No son dueñas de la ranura: ni updateEntry ni onDeliveryError
+ *  deben liberarla al cerrarse (liberarla dejaría desprotegida a la que sigue
+ *  en vuelo). Ver deliverPending. */
+const parallelApprovalIds = new Set<string>();
 
 /** Terminal en el gateway: la decisión ya no está pendiente. Tratarlo como
  *  éxito hace la cancelación idempotente (mismo criterio que
@@ -503,43 +496,19 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
       // resolver/expirar, onDeliveryError al fallar). Ver nota en
       // shouldHandleXmppApprovalRequest.
       const guardSessionKey = normalizeOptionalString(request.request.sessionKey);
-      if (guardSessionKey && !trackApproval(guardSessionKey)) {
-        log.warn(
-          `xmpp approvals: sesión ${guardSessionKey} ya tiene una aprobación en vuelo; se omite la segunda`,
-        );
-        // Antes este rechazo era silencioso para el usuario: onDeliveryError
-        // ve isGuardRejection y no hace nada (a propósito, para no liberar la
-        // ranura que sigue ocupada por la aprobación en vuelo), así que ni
-        // card ni texto llegaban al chat — solo un log. La única esperanza de
-        // que el usuario se enterara era que el agente narrara el toolResult
-        // de la llamada exec rechazada, algo que no está garantizado y que
-        // verificamos que upstream (2026.7.1) también delega al agente en su
-        // propio guard equivalente (ver sessionApprovalMergeKey en
-        // exec-approval). Se manda un aviso directo, igual que el reprompt de
-        // abajo, para no depender de esa narración.
-        const blocking = activeSessionApprovals.get(guardSessionKey);
-        try {
-          const { sendPayloadXmpp: sendGuardNotice } = await loadXmppSendRuntime();
-          const suffix = blocking?.approvalId
-            ? ` (${blocking.approvalId.slice(0, 8)})`
-            : "";
-          await sendGuardNotice(
-            preparedTarget.to,
-            `⏳ Ya hay una aprobación pendiente para esta sesión${suffix}. `
-              + `Resuelve esa antes de que se pueda pedir la siguiente.`,
-            { text: "" },
-            { cfg: cfg as CoreConfig, accountId: preparedTarget.accountId || accountId },
-          );
-        } catch (err) {
-          // No perder el rechazo original por un fallo al avisar: se loguea
-          // aparte y se sigue con el throw de abajo, que es lo que de verdad
-          // libera al agente para reintentar más tarde.
-          log.warn(`xmpp approvals: no se pudo avisar el rechazo por guard: ${String(err)}`);
-        }
-        throw new XmppApprovalGuardRejection(
-          `xmpp approvals: aprobación concurrente rechazada para ${guardSessionKey}`,
-        );
+      // Una segunda aprobación de la misma sesión (exec paralelos del mismo
+      // turno) ya NO se rechaza: rechazarla no la cancelaba en el core, que la
+      // dejaba pendiente y mandaba solo un "Reply with: /approve <id>" sin
+      // botones; el usuario aprobaba la card visible y el segundo comando
+      // nunca corría (incidente 2026-10-11, Bob). Se entrega su card normal
+      // —sus botones envían el mismo /approve <id> que ese texto— pero sin
+      // tomar la ranura: la primera sigue siendo la dueña del guard.
+      const parallel = Boolean(guardSessionKey && !trackApproval(guardSessionKey));
+      if (parallel) {
+        parallelApprovalIds.add(request.id);
+        log.info(`xmpp approvals: sesión ${guardSessionKey} ya tiene una aprobación en vuelo; se entrega la card paralela ${request.id}`);
       }
+      const slotSessionKey = parallel ? undefined : guardSessionKey;
       const deliveryAccountId = pendingPayload.accountId || preparedTarget.accountId || accountId;
       // Approval prompts are for the human operator, not the room: redirect
       // to approvalDmJid when the planned target is a shared MUC channel,
@@ -596,8 +565,8 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
 
       // Guardamos con qué card se ocupó la ranura del guard: es lo único que
       // permite cancelarla si la sesión muere antes de que el usuario decida.
-      if (guardSessionKey) {
-        rememberInFlightApproval(guardSessionKey, {
+      if (slotSessionKey) {
+        rememberInFlightApproval(slotSessionKey, {
           approvalId: request.id,
           jid: result.target,
           stanzaId: result.messageId,
@@ -617,7 +586,9 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
         node: `cmd:${result.messageId}`,
         expiresAt: request.expiresAtMs ?? Date.now() + DEFAULT_TTL_MS,
         createdAt: Date.now(),
-        ...(guardSessionKey ? { sessionKey: guardSessionKey } : {}),
+        // Solo la dueña de la ranura: el registro libera este sessionKey al
+        // cerrar la card (releaseSessionKey).
+        ...(slotSessionKey ? { sessionKey: slotSessionKey } : {}),
         ...(view.approvalKind === "exec" && view.commandText ? { commandText: view.commandText } : {}),
       });
 
@@ -638,11 +609,15 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
         jid: result.target,
         stanzaId: result.messageId,
         accountId: deliveryAccountId,
-        sessionKey: normalizeOptionalString(request.request.sessionKey),
+        // Las paralelas no devuelven sessionKey: updateEntry liberaría con él
+        // la ranura de la aprobación que sigue en vuelo.
+        sessionKey: slotSessionKey,
       };
     },
     updateEntry: async ({ cfg, accountId, entry, payload }) => {
       log.info(`xmpp approvals: updating card stanza=${entry.stanzaId}`);
+      const resolvedCard = approvalCardRegistry(entry.accountId || accountId).get(entry.stanzaId);
+      if (resolvedCard?.approvalId) parallelApprovalIds.delete(resolvedCard.approvalId);
       cancelRepromptByApprovalId(entry.stanzaId);
       if (entry.sessionKey) untrackApproval(entry.sessionKey);
       const cardRegistry = approvalCardRegistry(entry.accountId || accountId);
@@ -696,10 +671,12 @@ export const xmppApprovalNativeRuntime = createChannelApprovalNativeRuntimeAdapt
   observe: {
     onDeliveryError: ({ error, request }) => {
       log.error(`xmpp approvals: failed to deliver request ${request.id}: ${String(error)}`);
-      // El guard rechazando no es un fallo de entrega: ese sessionKey lo
-      // sostiene la aprobación que sigue en vuelo. Liberarlo aquí la dejaría
-      // desprotegida. Ver XmppApprovalGuardRejection.
-      if (isGuardRejection(error)) return;
+      // Una card paralela que no llegó no es dueña de la ranura: la sostiene la
+      // aprobación que sigue en vuelo. Ver parallelApprovalIds.
+      if (parallelApprovalIds.delete(request.id)) {
+        approvalCardRegistry(normalizeOptionalString(request.request.turnSourceAccountId)).removeByApprovalId(request.id);
+        return;
+      }
       const sessionKey = normalizeOptionalString(request.request.sessionKey);
       if (sessionKey) untrackApproval(sessionKey);
       // La card no llegó a entregarse: no debe quedar registrada como activa.
