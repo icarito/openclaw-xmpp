@@ -913,21 +913,26 @@ export async function encryptMucOmemoMessage(
   // (bundle.ts uses `${node}:${deviceId}`) that the v2 sidecar never
   // publishes to — every self-encrypt then failed with "bundle not found".
   //
-  // A room is only encrypted with v2 when *every* occupant can read it.
-  // A single stanza carries one protocol, and OMEMO 2 is still rare in the
-  // wild (Dino, Conversations and Cheogram all speak legacy), so one
-  // legacy-only occupant would be silently locked out of the whole room.
-  // Legacy is the safe common denominator: v2-capable clients publish
-  // legacy device lists as well, so preferring it excludes nobody.
+  // A single stanza carries one protocol. Choose OMEMO 2 when every
+  // occupant publishes v2 devices; otherwise use legacy only when every
+  // occupant publishes legacy devices. A mixed room without a common
+  // protocol must not emit ciphertext that some occupants cannot read.
   let useOmemo2ForMuc = configuredMucProtocol === "v2";
   if (configuredMucProtocol === "dual") {
     const legacyCapableJids: string[] = [];
+    const v2CapableJids: string[] = [];
     for (const jid of occupantJids) {
       const legacyDevices = await fetchDeviceList(accountId, bareJid(jid), log, "legacy");
       if (legacyDevices.length > 0) legacyCapableJids.push(bareJid(jid));
+      const v2Devices = await fetchDeviceList(accountId, bareJid(jid), log, "v2");
+      if (v2Devices.length > 0) v2CapableJids.push(bareJid(jid));
     }
-    useOmemo2ForMuc = legacyCapableJids.length === 0;
+    useOmemo2ForMuc = v2CapableJids.length === occupantJids.length;
     if (!useOmemo2ForMuc) {
+      if (legacyCapableJids.length !== occupantJids.length) {
+        log?.warn?.(`[${accountId}] MUC ${roomJid}: occupants have no common OMEMO protocol`);
+        return null;
+      }
       log?.debug?.(
         `[${accountId}] MUC ${roomJid}: using legacy OMEMO, ${legacyCapableJids.length} occupant(s) publish legacy devices (${legacyCapableJids.join(", ")})`,
       );
