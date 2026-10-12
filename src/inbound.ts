@@ -49,6 +49,8 @@ import { getXmppAccountActivity } from "./activity-registry.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
 
 const CHANNEL_ID = "xmpp" as const;
+const MUC_WORKING_NOTICE_MS = 20_000;
+const MUC_WORKING_NOTICE_TEXT = "⏳ Estoy en eso, te respondo en un momento.";
 type XmppGroupPolicy = "open" | "allowlist" | "disabled";
 type XmppReplyOptions = {
   streamingBehavior: "steer";
@@ -517,6 +519,22 @@ export async function handleXmppInbound(params: {
   await progress.start();
   let deliveredVisibleReply = false;
   let turnError: unknown = null;
+  // En salas la burbuja de progreso está apagada (ver progress.ts), así que un
+  // turno largo es silencio total para los ocupantes. Un único aviso plano, sin
+  // ediciones XEP-0308, si la respuesta tarda; nunca más de uno por turno.
+  const workingNoticeTimer = message.isGroup
+    ? setTimeout(() => {
+        if (deliveredVisibleReply) return;
+        void deliverXmppReply({
+          payload: { text: MUC_WORKING_NOTICE_TEXT },
+          cfg: config,
+          target: peerId,
+          accountId: account.accountId,
+          sendReply: params.sendReply,
+          statusSink,
+        }).catch((err) => runtime.error?.(`xmpp working notice failed: ${String(err)}`));
+      }, MUC_WORKING_NOTICE_MS)
+    : undefined;
 
   try {
     await core.channel.inbound.dispatchReply({
@@ -532,6 +550,7 @@ export async function handleXmppInbound(params: {
       delivery: {
         deliver: async (payload) => {
           deliveredVisibleReply = true;
+          clearTimeout(workingNoticeTimer);
           const p = payload as OutboundReplyPayload & {
             presentation?: unknown;
             mediaUrl?: string | null;
@@ -600,6 +619,7 @@ export async function handleXmppInbound(params: {
     turnError = err;
     runtime.error?.(`xmpp turn failed for ${peerId}: ${String(err)}`);
   }
+  clearTimeout(workingNoticeTimer);
   // El cierre del turno NO puede depender de que el pipeline haya terminado
   // bien: una excepción (exec fallido, modelo caído, red) antes se saltaba
   // TODO esto — la burbuja de progreso quedaba viva para siempre (el cliente
