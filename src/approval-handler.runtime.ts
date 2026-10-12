@@ -265,7 +265,7 @@ function resolveHandlerContext(params: ChannelApprovalCapabilityHandlerContext):
   };
 }
 
-function isXmppAccountConfiguredForApprovals(params: { cfg: CoreConfig; accountId?: string }): boolean {
+export function isXmppAccountConfiguredForApprovals(params: { cfg: CoreConfig; accountId?: string }): boolean {
   const account = resolveXmppAccount({ cfg: params.cfg, accountId: params.accountId });
   if (!account.configured) return false;
   if ((account.config.allowFrom ?? []).length === 0) return false;

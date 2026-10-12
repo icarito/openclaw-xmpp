@@ -1,5 +1,9 @@
 // Xmpp plugin module implements message adapter behavior.
-import { defineChannelMessageAdapter } from "openclaw/plugin-sdk/channel-outbound";
+import {
+  createMessageReceiptFromOutboundResults,
+  defineChannelMessageAdapter,
+} from "openclaw/plugin-sdk/channel-outbound";
+import { isXmppAccountConfiguredForApprovals } from "./approval-handler.runtime.js";
 import { sendEditXmpp, sendFileXmpp, sendMessageXmpp, sendPayloadXmpp } from "./send.js";
 import type { CoreConfig } from "./types.js";
 
@@ -21,6 +25,22 @@ function mediaLoaderOptions(params: Record<string, unknown>) {
  * aparecían, lo que ya produjo un diagnóstico falso una vez. */
 function logAdapterSend(kind: string, to: string, extra: string): void {
   console.error(`[xmpp][adapter-send] kind=${kind} to=${to} ${extra}`);
+}
+
+/** El core entrega el prompt local de una aprobación de exec como payload de
+ * herramienta (`channelData.execApproval`). En DM lo absorbe la burbuja de
+ * progreso; en una sala MUC llega hasta aquí y se sumaba a la card que ya
+ * entrega el handler nativo (approval-handler.runtime.ts): dos cards por
+ * aprobación. Si el handler nativo está activo para la cuenta, la card es
+ * suya y este prompt se descarta. */
+export function isNativelyHandledApprovalPrompt(params: {
+  cfg: CoreConfig;
+  accountId?: string | null;
+  payload?: { channelData?: Record<string, unknown> } | null;
+}): boolean {
+  const execApproval = params.payload?.channelData?.execApproval as { approvalId?: unknown } | undefined;
+  if (!execApproval || typeof execApproval.approvalId !== "string" || !execApproval.approvalId) return false;
+  return isXmppAccountConfiguredForApprovals({ cfg: params.cfg, accountId: params.accountId ?? undefined });
 }
 
 export const xmppMessageAdapter = defineChannelMessageAdapter({
@@ -110,6 +130,14 @@ export const xmppMessageAdapter = defineChannelMessageAdapter({
         to,
         `presentation=${payload?.presentation ? "yes" : "no"} channelData=${payload?.channelData ? "yes" : "no"} mediaUrl=${mediaUrl ? "yes" : "no"}`,
       );
+      if (!mediaUrl && isNativelyHandledApprovalPrompt({ cfg: cfg as CoreConfig, accountId, payload })) {
+        logAdapterSend("payload", to, "skipped=native-approval-card");
+        return {
+          messageId: "",
+          target: to,
+          receipt: createMessageReceiptFromOutboundResults({ results: [], kind: "text" }),
+        };
+      }
       if (mediaUrl) {
         return await sendFileXmpp(to, text, mediaUrl, {
           cfg: cfg as CoreConfig,
