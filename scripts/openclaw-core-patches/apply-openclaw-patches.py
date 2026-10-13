@@ -574,6 +574,48 @@ ELEVATED_ALIAS_NEW = (
 )
 
 
+# --- Parche: foreground fence suspendida durante la admisión del turno ------
+# Bug verificado 2026-10-12 con sondas y reproducción en sala de prueba. Si
+# llega un mensaje con mención mientras el turno anterior sigue activo pero sin
+# run embebido registrado (entre reintentos de compactación, por ejemplo), el
+# despacho nuevo espera en admitReplyTurn → replyRunRegistry.waitForIdle sin
+# avisar a la foreground reply fence. Su generación queda "activa", así que la
+# entrega final del turno anterior se queda esperando en
+# shouldCancelForegroundReplyDelivery (hay una generación más nueva activa) y
+# la operación nunca termina: bloqueo mutuo hasta que stuck-session recovery lo
+# rompe (~6-12 min). El turno nuevo entrega y la respuesta original se descarta
+# como stale-foreground. Solo la espera de followup (ReplyRunFollowupAdmission
+# BlockedError) suspendía la generación. El arreglo usa ese mismo mecanismo en
+# la espera por turno activo, y dispatchReplyFromConfig le pasa el callback a
+# admitReplyTurn (antes no se lo pasaba nunca).
+FENCE_ADMISSION_WAIT_APPLIED_MARK = "waitForFollowupAdmission(() => replyRunRegistry.waitForIdle("
+FENCE_ADMISSION_WAIT_OLD = (
+    "if (!await replyRunRegistry.waitForIdle(params.sessionKey, waitTimeoutMs, "
+    "{ signal: params.upstreamAbortSignal })) return {"
+)
+FENCE_ADMISSION_WAIT_NEW = (
+    "if (!await waitForFollowupAdmission(() => replyRunRegistry.waitForIdle(params.sessionKey, "
+    "waitTimeoutMs, { signal: params.upstreamAbortSignal }))) return {"
+)
+_FENCE_CB = "onFollowupAdmissionWaitChange: params.replyOptions?.onFollowupAdmissionWaitChange,\n"
+
+
+def _fence_dispatch_patch(indent, prefix=""):
+    """(applied_mark, old, new) para una llamada a admitReplyTurn en
+    dispatchReplyFromConfig; las tres se distinguen por su indentación."""
+    head = indent + prefix + "admission = await admitReplyTurn({\n" + indent + "\t"
+    return (head + _FENCE_CB, head + "sessionKey: dispatchOperationSessionKey,\n",
+            head + _FENCE_CB + indent + "\tsessionKey: dispatchOperationSessionKey,\n")
+
+
+FENCE_DISPATCH_FIRST_APPLIED_MARK, FENCE_DISPATCH_FIRST_OLD, FENCE_DISPATCH_FIRST_NEW = (
+    _fence_dispatch_patch("\t\t", "let "))
+FENCE_DISPATCH_RETRY_APPLIED_MARK, FENCE_DISPATCH_RETRY_OLD, FENCE_DISPATCH_RETRY_NEW = (
+    _fence_dispatch_patch("\t\t\t"))
+FENCE_DISPATCH_TERMINAL_APPLIED_MARK, FENCE_DISPATCH_TERMINAL_OLD, FENCE_DISPATCH_TERMINAL_NEW = (
+    _fence_dispatch_patch("\t\t\t\t"))
+
+
 # Parche "approval-handler-tick-quiet" RETIRADO 2026-09-26.
 # Silenciaba el latido console.error de approval-handler-event (tick/health
 # cada 30 s = ~60 MB/mes de openclaw.error.log, 97.6% ruido). Upstream eliminó
@@ -620,6 +662,14 @@ PATCHES = [
      SESSION_ROLLOVER_FAMILY_OLD, SESSION_ROLLOVER_FAMILY_NEW),
     ("elevated-full-sets-exec-security", ELEVATED_ALIAS_APPLIED_MARK,
      ELEVATED_ALIAS_OLD, ELEVATED_ALIAS_NEW),
+    ("fence-suspend-active-run-wait", FENCE_ADMISSION_WAIT_APPLIED_MARK,
+     FENCE_ADMISSION_WAIT_OLD, FENCE_ADMISSION_WAIT_NEW),
+    ("fence-callback-admission-first", FENCE_DISPATCH_FIRST_APPLIED_MARK,
+     FENCE_DISPATCH_FIRST_OLD, FENCE_DISPATCH_FIRST_NEW),
+    ("fence-callback-admission-retry", FENCE_DISPATCH_RETRY_APPLIED_MARK,
+     FENCE_DISPATCH_RETRY_OLD, FENCE_DISPATCH_RETRY_NEW),
+    ("fence-callback-admission-terminal", FENCE_DISPATCH_TERMINAL_APPLIED_MARK,
+     FENCE_DISPATCH_TERMINAL_OLD, FENCE_DISPATCH_TERMINAL_NEW),
 ]
 
 
@@ -684,7 +734,11 @@ def apply_patches(evaluated):
             # No imprimir acá: report_status() ya cubre este caso al final,
             # sin duplicar la línea.
             continue
-        path, src, old, new = r["path"], r["src"], r["old"], r["new"]
+        path, old, new = r["path"], r["old"], r["new"]
+        # Releer: varios parches pueden tocar el mismo archivo y el src de la
+        # evaluación ya no refleja los que se escribieron antes en esta corrida.
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
         n = src.count(old)
         if n != 1:
             print(f"  ! {name}: bloque original matchea {n} veces en "
