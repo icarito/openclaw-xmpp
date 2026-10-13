@@ -1,0 +1,19 @@
+{
+  "name": "xat-push-sender",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servicio HTTP de referencia que envía push FCM/APNs para los bridges de Prosody mod_fcm_push / mod_apns_push.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "@parse/node-apn": "^6.0.0"
+  },
+  "license": "MIT"
+}

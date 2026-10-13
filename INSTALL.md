@@ -106,8 +106,9 @@ declara `minHostVersion >= 2026.6.9`.
 ## 3. Servidor: Prosody
 
 Un ejemplo mínimo y verificado de configuración por dominio. Los módulos Lua
-propios (`mod_expo_push`, `mod_push_hints_filter`) son **opcionales** y solo
-sirven a clientes con push; ver `prosody-modules/README.md`.
+propios (`mod_expo_push`, `mod_fcm_push`, `mod_apns_push`,
+`mod_push_hints_filter`) son **opcionales** y solo sirven a clientes con push;
+ver `prosody-modules/README.md`.
 
 ```lua
 -- /etc/prosody/prosody.cfg.lua (fragmento)
@@ -166,6 +167,12 @@ Notas:
   `/usr/local/lib/prosody/modules/` y se cargan añadidos a `modules_enabled`
   (ver `prosody-modules/README.md`). Recordá `systemctl restart prosody`
   (SIGHUP no recarga módulos nuevos de forma confiable).
+- Los puentes push requieren `mod_cloud_notify` habilitado. `mod_fcm_push` y
+  `mod_apns_push` (a diferencia de `mod_expo_push`) no envían directo a los
+  proveedores: forwardean por HTTP a un servicio `push-sender`
+  (`prosody-modules/push-sender/`) que hay que correr y apuntar con
+  `fcm_push_endpoint` / `apns_push_endpoint`. Sin endpoint, loguean warn y no
+  entregan.
 
 ---
 
@@ -578,7 +585,9 @@ componente MUC cargue `muc_mam`.
 - **Aprobaciones colgadas / en bucle**: ver sección 8 (falta el parche 5 en un
   core no parcheado).
 - **Sin push a móviles**: faltan los módulos Lua `mod_expo_push` /
-  `mod_push_hints_filter` (opcionales).
+  `mod_push_hints_filter` (opcionales). Para FCM/APNs hacen falta además
+  `mod_fcm_push` / `mod_apns_push` **y** el servicio `push-sender` corriendo
+  con sus endpoints configurados en Prosody.
 - **OMEMO no arranca**: `OPENCLAW_OMEMO2_PYTHON` sin apuntar a un venv que
   tenga `omemo`/`twomemo` instalados.
 
@@ -592,7 +601,7 @@ componente MUC cargue `muc_mam`.
 | `src/config-schema.ts` / `src/config-defaults.ts` | esquema y defaults de `reliability`/`history`/`hooks` |
 | `src/accounts.ts` | resolución de cuentas, JID/password/service/resource |
 | `src/omemo/omemo2.ts` | ruta del venv del sidecar (`OPENCLAW_OMEMO2_PYTHON`) |
-| `prosody-modules/` | módulos Lua opcionales para push a móviles |
+| `prosody-modules/` | módulos Lua opcionales para push a móviles (Expo/FCM/APNs) y `push-sender/` (servicio HTTP de envío) |
 | `scripts/openclaw-core-patches/` | parches de paridad de aprobaciones (sección 8) |
 | `OPERATIONS.md` | modos de aprobación, MAM, tabla de flags |
 | `HOOKS.md` | contrato XEP-0050/XEP-0004/PEP/MAM para clientes ad-hoc |
