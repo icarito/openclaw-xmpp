@@ -536,8 +536,8 @@ export async function handleXmppInbound(params: {
       }, MUC_WORKING_NOTICE_MS)
     : undefined;
 
-  try {
-    await core.channel.inbound.dispatchReply({
+  const dispatchTurn = () =>
+    core.channel.inbound.dispatchReply({
       cfg: config as OpenClawConfig,
       channel: CHANNEL_ID,
       accountId: account.accountId,
@@ -615,6 +615,18 @@ export async function handleXmppInbound(params: {
         },
       },
     });
+  try {
+    try {
+      await dispatchTurn();
+    } catch (err) {
+      // El core rechaza el turno si la sesión rotó mientras esperaba la
+      // admisión (p. ej. la compactación del turno anterior se agotó y
+      // restauró el sessionId viejo) y pide reintentar. Sin esto el mensaje
+      // se perdía en silencio.
+      if (!/changed while starting work\. Retry\./.test(String(err))) throw err;
+      runtime.log?.(`xmpp: reintentando turno para ${peerId} tras rotación de sesión`);
+      await dispatchTurn();
+    }
   } catch (err) {
     turnError = err;
     runtime.error?.(`xmpp turn failed for ${peerId}: ${String(err)}`);
