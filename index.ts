@@ -1,6 +1,7 @@
 // Xmpp plugin entrypoint registers its OpenClaw integration.
 import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
 import { registerXmppAvatarGatewayMethods, XMPP_SET_AVATAR_METHOD } from "./src/avatar-gateway.js";
+import { registerPiWorkerTool } from "./src/pi-worker-tool.js";
 
 export default defineBundledChannelEntry({
   id: "xmpp",
@@ -12,6 +13,7 @@ export default defineBundledChannelEntry({
   // aprobaciones.
   registerFull: (api) => {
     registerXmppAvatarGatewayMethods(api);
+    registerPiWorkerTool(api);
 
     // Cancelación activa: una aprobación cuya sesión murió se queda en
     // pantalla hasta expirar (el core no tiene salida por sesión, y el
