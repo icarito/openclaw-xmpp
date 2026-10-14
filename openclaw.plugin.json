@@ -3,6 +3,9 @@
   "activation": {
     "onStartup": false
   },
+  "contracts": {
+    "tools": ["pi_worker"]
+  },
   "channels": ["xmpp"],
   "channelConfigs": {
     "xmpp": {
