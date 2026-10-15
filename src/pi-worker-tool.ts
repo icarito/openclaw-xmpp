@@ -1,4 +1,5 @@
 import { createConnection } from "node:net";
+import { execFile } from "node:child_process";
 import { Type } from "typebox";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
 
@@ -9,9 +10,12 @@ const OWNER_JID = "sebastian@hablar.fuentelibre.org";
 const BARE_JID_PATTERN = "^[^@\\s/]+@[^@\\s/]+$";
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const SOURCE_SYNC = "/opt/claudio-w/openclaw-server/scripts/pi-worker/pi-source-sync";
+const PROJECT_PATTERN = "^[a-z0-9][a-z0-9-]{0,63}$";
 
 const PiWorkerParams = Type.Object({
   action: Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("stop")]),
+  project: Type.String({ minLength: 1, maxLength: 64, pattern: PROJECT_PATTERN }),
   room_jid: Type.Optional(Type.String({ minLength: 3, maxLength: 1024, pattern: BARE_JID_PATTERN })),
   spec: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
   authorized_jids: Type.Optional(
@@ -26,6 +30,7 @@ const PiWorkerParams = Type.Object({
 
 type PiWorkerParams = {
   action: "start" | "status" | "stop";
+  project: string;
   room_jid?: string;
   spec?: string;
   authorized_jids?: string[];
@@ -56,6 +61,9 @@ function requesterJid(senderId: string | undefined, deliveryTarget: string | und
 
 function validateParams(params: PiWorkerParams, ctx: OpenClawPluginToolContext): string | undefined {
   if (!isOperatorXmppRun(ctx)) return "pi_worker solo está disponible para Operator desde XMPP.";
+  if (typeof params.project !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(params.project)) {
+    return "pi_worker requiere un identificador de proyecto válido.";
+  }
   if ((params.action === "start" || params.action === "stop") &&
       requesterJid(ctx.requesterSenderId, ctx.deliveryContext?.to) !== OWNER_JID) {
     return "Solo el propietario puede iniciar o detener una sesión Pi.";
@@ -78,6 +86,18 @@ function validateParams(params: PiWorkerParams, ctx: OpenClawPluginToolContext):
     return `${params.action} no acepta parámetros de inicio.`;
   }
   return undefined;
+}
+
+function syncOperatorRepo(project: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile("/usr/bin/python3", [SOURCE_SYNC, project], {
+      timeout: 60_000,
+      maxBuffer: 4 * 1024,
+    }, (error) => {
+      if (error) reject(new Error("No se pudo sincronizar el clon de Operator para este proyecto."));
+      else resolve();
+    });
+  });
 }
 
 function isBareJid(jid: string): boolean {
@@ -135,7 +155,7 @@ export function registerPiWorkerTool(api: OpenClawPluginApi): void {
       name: "pi_worker",
       label: "Pi worker",
       description:
-        "Inicia, consulta o detiene la sesión Pi del proyecto claudio-w en el MUC actual.",
+        "Inicia, consulta o detiene la sesión Pi de un proyecto configurado en el MUC actual. Solo puede haber una sesión activa; indica siempre project.",
       parameters: PiWorkerParams,
       async execute(_toolCallId, rawParams) {
         const params = rawParams as PiWorkerParams;
@@ -144,7 +164,7 @@ export function registerPiWorkerTool(api: OpenClawPluginApi): void {
 
         const request: Record<string, unknown> = {
           action: params.action,
-          project: "claudio-w",
+          project: params.project,
         };
         if (params.action === "start") {
           request.room_jid = params.room_jid;
@@ -153,6 +173,7 @@ export function registerPiWorkerTool(api: OpenClawPluginApi): void {
         }
 
         try {
+          if (params.action === "start") await syncOperatorRepo(params.project);
           const result = await callPiWorker(request);
           return { content: [{ type: "text", text: result }], details: {} };
         } catch (error) {
