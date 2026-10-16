@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { xml } from "@xmpp/client";
 
-import { OutboundSpool } from "../outbound-spool.js";
+import { acknowledgeOwnMucEcho, OutboundSpool } from "../outbound-spool.js";
 import { buildOriginIdElement } from "../protocol.js";
 
 const tempDirs: string[] = [];
@@ -77,6 +77,30 @@ describe("OutboundSpool", () => {
     expect(spool.stats().pending).toBe(1);
     expect(spool.ack("oc-9")).toBe(true);
     expect(spool.stats().pending).toBe(0);
+  });
+
+  it("el eco del MUC confirma el envío y evita reenviarlo tras reiniciar", () => {
+    const path = tempPath();
+    const spool = new OutboundSpool({ path, maxAgeMs: 1_000_000, maxAttempts: 5 });
+    const room = "engineering@conference.example.org";
+    const stanza = xml("message", { type: "groupchat", to: room, id: "oc-echo" }, buildOriginIdElement("oc-echo"));
+    spool.enqueue({ originId: "oc-echo", to: room, type: "groupchat", stanza });
+    spool.noteSent("oc-echo");
+
+    const echo = xml("message", { type: "groupchat", from: `${room}/operator`, id: "oc-echo" }, buildOriginIdElement("oc-echo"));
+    expect(acknowledgeOwnMucEcho(spool, echo, "operator")).toBe(true);
+    expect(new OutboundSpool({ path, maxAgeMs: 1_000_000, maxAttempts: 5 }).listDue()).toHaveLength(0);
+  });
+
+  it("no confirma mensajes desde otro MUC ni con otro nick", () => {
+    const spool = new OutboundSpool({ path: null, maxAgeMs: 1_000_000, maxAttempts: 5 });
+    const room = "engineering@conference.example.org";
+    spool.enqueue({ originId: "oc-echo", to: room, type: "groupchat", stanza: xml("message", { type: "groupchat", to: room }, buildOriginIdElement("oc-echo")) });
+    const wrongRoom = xml("message", { type: "groupchat", from: "other@conference.example.org/operator" }, buildOriginIdElement("oc-echo"));
+    const wrongNick = xml("message", { type: "groupchat", from: `${room}/sebastian` }, buildOriginIdElement("oc-echo"));
+    expect(acknowledgeOwnMucEcho(spool, wrongRoom, "operator")).toBe(true);
+    expect(acknowledgeOwnMucEcho(spool, wrongNick, "operator")).toBe(false);
+    expect(spool.stats().pending).toBe(1);
   });
 
   it("clasifica duplicate-commit como fatal y lo pasa a dead-letter", () => {
