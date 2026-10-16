@@ -131,6 +131,7 @@ export async function encryptOmemo2(
   accountId: string,
   recipients: string[],
   plaintext: string,
+  requireAllRecipients = false,
 ): Promise<Element | null> {
   const client = clients.get(accountId);
   if (!client) return null;
@@ -138,6 +139,9 @@ export async function encryptOmemo2(
     jids: recipients,
     plaintext,
   });
+  if (requireAllRecipients && result.errors.length > 0) {
+    throw new Error(`OMEMO 2 could not encrypt for every MUC recipient (${result.errors.length} error(s))`);
+  }
   if (result.messages.length === 0) {
     throw new Error(result.errors.join("; ") || "OMEMO 2 produced no encrypted message");
   }
