@@ -117,6 +117,28 @@ module:hook("cloud_notify/push", function (event)
 		return true;
 	end
 
+	-- SÓLO mensajes nuevos con contenido (mismo criterio que xat_push_policy):
+	-- los eventos PEP de los agentes (telemetría/hooks), chat states y recibos
+	-- disparaban push con el título genérico y, al llegar cada pocos segundos,
+	-- mantenían abierta la ventana de coalescing ("Tienes 237 mensajes nuevos").
+	local stanza = event.stanza;
+	if stanza and stanza.attr then
+		local st_type = stanza.attr.type;
+		if st_type == "headline" or st_type == "error" then
+			return true;
+		end
+		if stanza:get_child("event", "http://jabber.org/protocol/pubsub#event") then
+			return true;
+		end
+		local has_body = stanza:get_child("body") ~= nil;
+		local has_content = stanza:get_child("encrypted") ~= nil
+			or stanza:get_child("x", "jabber:x:oob") ~= nil;
+		if not event.important and not has_body and not has_content then
+			module:log("debug", "Skipping Expo push without body for %s", tostring(event.username));
+			return true;
+		end
+	end
+
 	local summary = event.push_summary or {};
 	local sender = summary["last-message-sender"];
 	local body = summary["last-message-body"];
