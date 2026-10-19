@@ -84,9 +84,8 @@ async function handleFcm(body) {
     notification: {
       title: body.title || 'Nuevo mensaje',
       body: body.body || '',
-      // Notificación estable por conversación: Android reemplaza la anterior
-      // en vez de apilar una por mensaje.
-      ...(collapse ? { tag: collapse } : {}),
+      // FCM v1 no admite `tag` aquí ("Unknown name tag at message.notification"):
+      // va en android.notification, abajo, que es donde Android lo usa.
     },
     data: toStringMap(body.data),
     android: {

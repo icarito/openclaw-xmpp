@@ -212,6 +212,15 @@ function M.install(module, conf)
 			return true;
 		end
 
+		-- Prosody 13 no pasa la stanza en cloud_notify/push (event.stanza nil):
+		-- el filtro por contenido de abajo no corre y los pushes sin contenido
+		-- (conexiones de agentes, chat states, PEP) pasaban. `important` lo pone
+		-- mod_cloud_notify en mensajes con body o cifrados; el resto no despierta.
+		if not event.important then
+			module:log("debug", "Suppressing non-important push for %s", tostring(event.username));
+			return true;
+		end
+
 		-- SÓLO mensajes nuevos con contenido. Antes cualquier stanza sin <body>
 		-- caía al texto genérico "Tienes un mensaje nuevo", así que los eventos
 		-- PEP de los agentes (pubsub) y los chat states/recibos despertaban el
