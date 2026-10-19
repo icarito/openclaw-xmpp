@@ -122,6 +122,15 @@ module:hook("cloud_notify/push", function (event)
 	-- disparaban push con el título genérico y, al llegar cada pocos segundos,
 	-- mantenían abierta la ventana de coalescing ("Tienes 237 mensajes nuevos").
 	local stanza = event.stanza;
+	-- Prosody 13 no pasa la stanza en cloud_notify/push (event.stanza es nil),
+	-- así que el filtro por contenido de abajo no corría: el criterio fiable es
+	-- `important`, que mod_cloud_notify pone en mensajes con body o cifrados.
+	-- Visto en producción: un push por minuto con important=false por cada
+	-- conexión de operator.
+	if not event.important then
+		module:log("debug", "Skipping non-important Expo push for %s", tostring(event.username));
+		return true;
+	end
 	if stanza and stanza.attr then
 		local st_type = stanza.attr.type;
 		if st_type == "headline" or st_type == "error" then
