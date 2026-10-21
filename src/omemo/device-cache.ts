@@ -7,7 +7,7 @@
 
 import type { Logger, OmemoDevice } from "./types.js";
 import { fetchDeviceList, parseDeviceListEvent } from "./device.js";
-import { NS_OMEMO_DEVICES } from "./types.js";
+import { NS_OMEMO_DEVICES, NS_OMEMO_DEVICES_V2 } from "./types.js";
 import type { PepItem } from "../pep.js";
 
 // =============================================================================
@@ -175,8 +175,11 @@ export async function handleDeviceListPepEvent(event: {
 }): Promise<void> {
   const { accountId, from, node, items, log } = event;
 
-  // Only handle device list node
-  if (node !== NS_OMEMO_DEVICES) {
+  // Handle both legacy and OMEMO 2 device list nodes. The v2 node is the one
+  // modern clients (gtk-llm-chat-android) publish to; ignoring it left the cache
+  // stale until the 5-min TTL, so fresh devices (e.g. a newly published client)
+  // were never picked up for encryption and messages arrived undecryptable.
+  if (node !== NS_OMEMO_DEVICES && node !== NS_OMEMO_DEVICES_V2) {
     return;
   }
 
