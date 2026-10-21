@@ -276,6 +276,27 @@ export function getRoomOccupantJids(
 }
 
 /**
+ * Formatea la lista actual de ocupantes de la sala para el contexto del agente:
+ * "nick <real-jid>" por línea (real JID sólo si la sala lo expone). Incluye
+ * nuestro propio nick. Útil para que el agente sepa QUIÉN está en el grupo
+ * (p.ej. quién más lo está leyendo) sin tener que adivinar.
+ */
+export function formatRoomParticipants(accountId: string, roomJid: string): string {
+  const room = roomStates.get(roomKey(accountId, roomJid));
+  if (!room || room.occupants.size === 0) return "";
+  const lines: string[] = [];
+  for (const occupant of room.occupants.values()) {
+    const label = occupant.nick || occupant.occupantJid;
+    if (occupant.realJid && occupant.realJid !== room.roomJid) {
+      lines.push(`${label} <${occupant.realJid}>`);
+    } else {
+      lines.push(label);
+    }
+  }
+  return lines.sort().join(", ");
+}
+
+/**
  * Check if a room supports OMEMO (non-anonymous with tracked occupants)
  */
 export function isRoomOmemoCapable(accountId: string, roomJid: string): boolean {
