@@ -38,6 +38,7 @@ import {
   getOccupantRealJid,
   isTrackedMucJid,
 } from "./muc-occupants.js";
+import { fetchMucAffiliatedJids, mergeMucRecipientJids } from "./muc-members.js";
 
 // =============================================================================
 // RE-EXPORTS
@@ -895,14 +896,22 @@ export async function encryptMucOmemoMessage(
     return null;
   }
 
-  // Get real JIDs of room occupants
-  const occupantJids = getRoomOccupantJids(accountId, roomJid, true);
-  if (!occupantJids || occupantJids.length === 0) {
-    log?.warn?.(`[${accountId}] No occupant JIDs available for room ${roomJid}`);
+  // Online occupants alone omit offline members and owners from MAM history.
+  // Always retrieve all three affiliation lists before constructing keys.
+  // A failed query must reject the send, never fall back to plaintext or to
+  // a partial encrypted stanza that some members cannot decrypt.
+  const affiliatedJids = await fetchMucAffiliatedJids(accountId, roomJid);
+  const occupantJids = mergeMucRecipientJids(
+    affiliatedJids,
+    getRoomOccupantJids(accountId, roomJid, true) ?? [],
+    store.getSelfJid(),
+  );
+  if (occupantJids.length === 0) {
+    log?.warn?.(`[${accountId}] No MUC OMEMO recipients available for room ${roomJid}`);
     return null;
   }
 
-  log?.debug?.(`[${accountId}] MUC OMEMO: encrypting for ${occupantJids.length} occupants in ${roomJid}`);
+  log?.debug?.(`[${accountId}] MUC OMEMO: encrypting for ${occupantJids.length} recipients in ${roomJid}`);
 
   const configuredMucProtocol = getOmemoProtocol(accountId);
   // "dual" accounts run the genuine OMEMO 2 sidecar alongside the legacy
@@ -918,6 +927,7 @@ export async function encryptMucOmemoMessage(
   // occupant publishes legacy devices. A mixed room without a common
   // protocol must not emit ciphertext that some occupants cannot read.
   let useOmemo2ForMuc = configuredMucProtocol === "v2";
+  let legacyCapableCount = 0;
   if (configuredMucProtocol === "dual") {
     const legacyCapableJids: string[] = [];
     const v2CapableJids: string[] = [];
@@ -928,10 +938,10 @@ export async function encryptMucOmemoMessage(
       if (v2Devices.length > 0) v2CapableJids.push(bareJid(jid));
     }
     useOmemo2ForMuc = v2CapableJids.length === occupantJids.length;
+    legacyCapableCount = legacyCapableJids.length;
     if (!useOmemo2ForMuc) {
       if (legacyCapableJids.length !== occupantJids.length) {
-        log?.warn?.(`[${accountId}] MUC ${roomJid}: occupants have no common OMEMO protocol`);
-        return null;
+        throw new Error(`MUC ${roomJid}: recipients have no common OMEMO protocol`);
       }
       log?.debug?.(
         `[${accountId}] MUC ${roomJid}: using legacy OMEMO, ${legacyCapableJids.length} occupant(s) publish legacy devices (${legacyCapableJids.join(", ")})`,
@@ -945,10 +955,11 @@ export async function encryptMucOmemoMessage(
         accountId,
         occupantJids.map(bareJid),
         buildSceEnvelope(plaintext, roomJid),
+        true,
       );
     } catch (err) {
       log?.error?.(`[${accountId}] genuine OMEMO 2 MUC encryption failed: ${err instanceof Error ? err.message : String(err)}`);
-      if (configuredMucProtocol === "v2") return null;
+      if (configuredMucProtocol === "v2" || legacyCapableCount !== occupantJids.length) throw err;
       log?.warn?.(`[${accountId}] falling back to legacy MUC OMEMO encryption for ${roomJid}`);
     }
   }
@@ -974,8 +985,7 @@ export async function encryptMucOmemoMessage(
     }
 
     if (allDevices.length === 0) {
-      log?.warn?.(`[${accountId}] No OMEMO devices found for any occupant in ${roomJid}`);
-      return null;
+      throw new Error(`No OMEMO devices found for MUC recipients in ${roomJid}`);
     }
 
     // Also include our own devices for multi-device sync
@@ -1067,9 +1077,8 @@ export async function encryptMucOmemoMessage(
       }
     }
 
-    if (keyElements.length === 0) {
-      log?.error?.(`[${accountId}] Could not encrypt for any device in room ${roomJid}`);
-      return null;
+    if (occupantDevicesEncrypted !== allDevices.length) {
+      throw new Error(`Could not encrypt for every MUC recipient device in ${roomJid}`);
     }
 
 
@@ -1085,7 +1094,7 @@ export async function encryptMucOmemoMessage(
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     log?.error?.(`[${accountId}] MUC OMEMO encryption failed: ${error}`);
-    return null;
+    throw err;
   }
 }
 

@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { parse as parseXml } from "ltx";
 import type { Element } from "@xmpp/xml";
 import { classifyDeliveryError, computeBackoffMs, type DeliveryFailureClass } from "./delivery-failure.js";
+import { getOriginId } from "./protocol.js";
 
 export type OutboundSpoolState = "pending" | "dead";
 
@@ -282,6 +283,20 @@ export class OutboundSpool {
       // Best-effort: a spool write failure must not fail the send.
     }
   }
+}
+
+/** A MUC's reflection proves it accepted our message, even without an SM ack. */
+export function acknowledgeOwnMucEcho(spool: OutboundSpool | null, stanza: Element, nick: string): boolean {
+  if (stanza.attrs.type !== "groupchat") return false;
+  const from = stanza.attrs.from;
+  if (typeof from !== "string" || !from.endsWith(`/${nick}`)) return false;
+  const originId = getOriginId(stanza);
+  if (!originId || !spool) return true;
+  const entry = spool.get(originId);
+  if (entry?.type === "groupchat" && entry.to === from.slice(0, -(nick.length + 1))) {
+    spool.ack(originId);
+  }
+  return true;
 }
 
 const REGISTRY_KEY = Symbol.for("openclaw.xmpp.outboundSpools");
