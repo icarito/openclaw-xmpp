@@ -40,7 +40,7 @@ import { publishActivityHookEvent, publishApprovalHookEvent } from "./hooks/pep-
 import { rememberInboundReplyContext } from "./reply-context.js";
 import { NS_REACTIONS } from "./reactions.js";
 import { getOutboundBurstBreaker } from "./burst-breaker.js";
-import { getOutboundSpool, resolveOutboundSpoolPath, type OutboundSpool } from "./outbound-spool.js";
+import { acknowledgeOwnMucEcho, getOutboundSpool, resolveOutboundSpoolPath, type OutboundSpool } from "./outbound-spool.js";
 import { getDispatchDedupe, resolveDispatchDedupePath } from "./dispatch-dedupe.js";
 import { InboundDebouncer, shouldDebounceInbound } from "./inbound-debounce.js";
 import {
@@ -688,6 +688,10 @@ export async function monitorXmppProvider(opts: XmppMonitorOptions): Promise<{ s
 
     const type = realStanza.attrs.type;
     if (type !== "chat" && type !== "groupchat") return;
+
+    // The room's echo confirms delivery even when no stream ack arrives.
+    // Consume it before OMEMO decryption or inbound dispatch.
+    if (acknowledgeOwnMucEcho(outboundSpool, realStanza, botNick)) return;
 
     // XEP-0184 receipt: the recipient confirmed delivery of one of our
     // spooled messages. Ack it and never turn it into agent input.

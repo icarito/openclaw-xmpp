@@ -46,6 +46,7 @@ import {
   sendTypingXmpp,
 } from "./send.js";
 import { getXmppAccountActivity } from "./activity-registry.js";
+import { formatRoomParticipants } from "./omemo/muc-occupants.js";
 import type { CoreConfig, XmppInboundMessage } from "./types.js";
 
 const CHANNEL_ID = "xmpp" as const;
@@ -474,6 +475,9 @@ export async function handleXmppInbound(params: {
     SenderId: senderDisplay,
     GroupSubject: message.isGroup ? message.target : undefined,
     GroupSystemPrompt: message.isGroup ? groupSystemPrompt : undefined,
+    GroupMembers: message.isGroup
+      ? formatRoomParticipants(route.accountId, message.target)
+      : undefined,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     WasMentioned: message.isGroup ? wasMentioned : undefined,
